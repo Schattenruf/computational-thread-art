@@ -1,14 +1,21 @@
 import base64
+import json
 import gc
 import io
 import os
 import sys
+
+#print("Working directory:", os.getcwd())
+#print("Directory contents:", os.listdir())
 import tempfile
 import traceback
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
+import numpy as np
+from sklearn.cluster import KMeans
 
 import streamlit as st
 
