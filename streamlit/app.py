@@ -601,6 +601,20 @@ with st.sidebar:
     preset_lines = demo_presets[demo_option].get("lines", None)
     preset_step_size = demo_presets[demo_option].get("step_size", None)
 
+    # Number of Colors (user control). Placed BEFORE image quantize so suggestions can read it.
+    # Initialize session_state if not set (but don't use value= parameter to avoid warning)
+    if "num_colors_input" not in st.session_state:
+        default_num_colors = (len(preset_palette) if (preset_palette and isinstance(preset_palette, (list, tuple))) else 3)
+        st.session_state["num_colors_input"] = default_num_colors
+    
+    num_colors = st.number_input(
+        "Number of Colors",
+        min_value=1,
+        max_value=10,
+        key="num_colors_input",
+        help="We recommend always including black and white, as well as between 1 and 4 other colors depending on your image.",
+    )
+
     image_selected = False
     image = None
 
@@ -621,9 +635,152 @@ with st.sidebar:
         image = Image.open(io.BytesIO(image_bytes))
         st.image(
             image,
-            use_container_width=True,
+            width='stretch',
         )
+        
+        # === Neue HSV-basierte Farberkennung mit Checkbox-Selection ===
+        # Only recompute if image changed (hash the bytes to detect changes)
+        import hashlib
+        image_hash = hashlib.md5(image_bytes).hexdigest()
+        image_changed = st.session_state.get("last_image_hash") != image_hash
+        
+        if image_changed:
+            try:
+                hsv_colors = extract_colors_hsv(image)
+                
+                # Flatten all colors into one list with category info
+                all_found_colors = []
+                
+                # Add black & white if present
+                if hsv_colors['black']:
+                    all_found_colors.append(('Schwarz', hsv_colors['black']))
+                if hsv_colors['white']:
+                    all_found_colors.append(('Weiß', hsv_colors['white']))
+                
+                # Add colored categories
+                for color_info in hsv_colors['red']:
+                    all_found_colors.append(('Rot', color_info))
+                for color_info in hsv_colors['orange']:
+                    all_found_colors.append(('Orange', color_info))
+                for color_info in hsv_colors['yellow']:
+                    all_found_colors.append(('Gelb', color_info))
+                for color_info in hsv_colors['green']:
+                    all_found_colors.append(('Grün', color_info))
+                for color_info in hsv_colors['cyan']:
+                    all_found_colors.append(('Cyan', color_info))
+                for color_info in hsv_colors['blue']:
+                    all_found_colors.append(('Blau', color_info))
+                for color_info in hsv_colors['purple']:
+                    all_found_colors.append(('Lila', color_info))
+                
+                # Store in session state
+                st.session_state.all_found_colors = all_found_colors
+                st.session_state.last_image_hash = image_hash
+                
+                # Initialize checkbox states (alle Farben sind initial ausgewählt)
+                st.session_state.color_checkbox_states = [True] * len(all_found_colors)
+                    
+            except Exception as e:
+                st.session_state.all_found_colors = []
+                st.session_state.color_checkbox_states = []
+        
+        # Falls noch keine Farben geladen, verwende decompose_data fallback
+        if not st.session_state.get("all_found_colors"):
+            # For demo images or when color detection is not available
+            dd = st.session_state.get("decompose_data")
+            if dd:
+                pl = dd.get("palette", []) or []
+                hl = dd.get("color_histogram", []) or []
+            else:
+                pl = []
+                hl = []
 
+            # Only proceed if we have a palette estimate
+            if pl:
+                    # Only auto-fill when there isn't already a demo preset palette
+                    if not preset_palette:
+                        DEFAULT_TOTAL_SUGGESTED_LINES = 10000
+
+                        # normalize palette items to tuples of ints
+                        suggested_palette = [tuple(map(int, c)) for c in pl]
+
+                        # Validate histogram format - ensure it's a list of numbers
+                        try:
+                            # If hl contains dicts or tuples, extract 'percent' field or first element
+                            if hl and isinstance(hl[0], dict):
+                                hl = [item.get('percent', 0) for item in hl]
+                            elif hl and isinstance(hl[0], (list, tuple)):
+                                hl = [float(item[0]) if item else 0 for item in hl]
+                            # Ensure all elements are numbers
+                            hl = [float(h) if not isinstance(h, (list, tuple, dict)) else 0 for h in hl]
+                        except Exception:
+                            # Fallback: distribute evenly if histogram is invalid
+                            hl = [1.0 / len(suggested_palette)] * len(suggested_palette)
+
+                        # compute suggested lines; avoid zeros
+                        suggested_lines = [max(100, int(h * DEFAULT_TOTAL_SUGGESTED_LINES)) for h in hl]
+
+                        # fix rounding remainder by adding to the darkest color (same heuristic as elsewhere)
+                        remainder = DEFAULT_TOTAL_SUGGESTED_LINES - sum(suggested_lines)
+                        if remainder != 0:
+                            try:
+                                sums = [sum(c) for c in suggested_palette]
+                                darkest_idx = sums.index(max(sums))
+                            except Exception:
+                                darkest_idx = 0
+                            suggested_lines[darkest_idx] += remainder
+
+                        # default darkness values (adjust if you want heuristics here)
+                        suggested_darkness = [0.17] * len(suggested_palette)
+
+                        # set local preset_* variables used later to render the UI
+                        preset_palette = suggested_palette
+                        preset_lines = suggested_lines
+                        preset_darkness = suggested_darkness
+
+                        # also keep session_state in sync
+                        st.session_state.decompose_data = {"palette": suggested_palette, "color_histogram": hl}
+
+        # =======================================================================================================
+            # Prefill widgets from suggested palette/lines if they are not already set in session_state
+            # WICHTIG: Nur ausführen wenn NICHT durch "Vorschlag generieren" Button befüllt wurde
+            # (User soll explizit "Vorschlag übernehmen" klicken)
+        try:
+            # Prefill nur wenn nicht durch "Vorschlag generieren" ausgelöst
+            skip_prefill = st.session_state.get("skip_prefill_after_suggestion", False)
+            is_from_button = st.session_state.get("decompose_data") and not preset_palette
+            
+            if 'preset_palette' in locals() and preset_palette and not is_from_button and not skip_prefill:
+                for i, col in enumerate(preset_palette):
+                    # color picker expects hex string
+                    hex_col = f"#{int(col[0]):02x}{int(col[1]):02x}{int(col[2]):02x}"
+                    # color picker key: color_pick_{i}
+                    key_color = f"color_pick_{i}"
+                    if key_color not in st.session_state:
+                        st.session_state[key_color] = hex_col
+
+                if 'preset_lines' in locals() and preset_lines:
+                    for i, val in enumerate(preset_lines):
+                        key_lines = f"lines_{i}"
+                        # only set if the widget key not already present (so we don't clobber user edits)
+                        if key_lines not in st.session_state:
+                            st.session_state[key_lines] = int(val)
+
+                if 'preset_darkness' in locals() and preset_darkness:
+                    for i, val in enumerate(preset_darkness):
+                        key_dark = f"darkness_{i}"
+                        if key_dark not in st.session_state:
+                            st.session_state[key_dark] = float(val)
+
+                # Optional: ensure the visible "Number of Colors" control shows the suggested number
+                # (this requires you to give the num_colors number_input a key; see note below)
+                # desired_num_colors = len(preset_palette)
+                # if "num_colors_input" not in st.session_state:
+                #     st.session_state["num_colors_input"] = desired_num_colors
+        except Exception:
+            # fail silently - do not break the UI
+            pass
+            
     # Basic parameters
     col1, col2, col3 = st.columns(3)
     with col1:
