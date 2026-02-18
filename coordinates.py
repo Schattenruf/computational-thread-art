@@ -301,7 +301,7 @@ def build_through_pixels_dict(
                 elif key_type == "horizontal":
                     i, j = n1, n2 + a
                 elif key_type == "diagonal":
-                    if nx >= ny:
+                    if nx > ny:
                         i, j = n2 + a, n2 - b
                     else:
                         i, j = n2 - a, n2 + b
