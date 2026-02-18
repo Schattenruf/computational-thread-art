@@ -819,7 +819,7 @@ with st.sidebar:
             help="Number of nodes on the perimeter of the image to generate lines between. This increases resolution but also time to create the image.",
         )
         # Ensure n_nodes is a multiple of 4, but don't add an extra 4 when already divisible
-        n_nodes_real = n_nodes if (n_nodes % 4 == 0) else n_nodes + (4 - n_nodes % 4)
+        n_nodes_real = n_nodes + (4 - n_nodes % 4)  # Ensure n_nodes is a multiple of 4
         st.session_state["n_nodes_real"] = n_nodes_real  # Store for later use in PDF export
     with col3:
         shape = st.selectbox(
