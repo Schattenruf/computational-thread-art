@@ -74,43 +74,6 @@ def rgb_to_hsv(img_rgb):
     hsv = np.stack([h, s, v], axis=-1)
     return hsv
 
-						
-																	   
-											
-
-						
-						 
-																		 
-
-					   
-					   
-					   
-
-							 
-													 
-													 
-													 
-
-								  
-				
-				
-
-						 
-					  
-
-			 
-																		
-
-			 
-			 
-			 
-
-						 
-						   
-						   
-
-												   
-
 def hue_in_ranges(hue_array, ranges_deg):
     """hue_array in [0,1]. ranges_deg is list of (min_deg, max_deg) - may include negative for wrap."""
     h_deg = (hue_array * 360.0) % 360.0
@@ -137,11 +100,6 @@ def get_top_colors_kmeans(pixels_rgb, top_n=3):
     else:
         sample = pixels_rgb
 
-										
-											
-									 
-									 
-
     k = min(top_n, len(sample))
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
     kmeans.fit(sample)
@@ -149,18 +107,9 @@ def get_top_colors_kmeans(pixels_rgb, top_n=3):
     labels = kmeans.predict(pixels_rgb)
     results = []
     total = len(pixels_rgb)
-								  
     for i, center in enumerate(centers):
         cnt = int((labels == i).sum())
         percent = cnt / total
-														   
-														 
-										
-					
-										   
-																  
-											   
-														  
         hexcol = '#{:02x}{:02x}{:02x}'.format(int(center[0]), int(center[1]), int(center[2]))
         results.append({'hex': hexcol, 'percent': percent, 'rgb': tuple(center)})
     results.sort(key=lambda x: x['percent'], reverse=True)
@@ -200,46 +149,26 @@ def extract_colors_hsv(image_pil):
 
     # Hue ranges
     red_mask = hue_in_ranges(h, [(-20, 20)]) & non_grey_mask & (s >= MIN_SAT)
-																			   
-																			   
     green_mask = hue_in_ranges(h, [(60, 170)]) & non_grey_mask & (s >= MIN_SAT)
-																			   
     blue_mask = hue_in_ranges(h, [(200, 280)]) & non_grey_mask & (s >= MIN_SAT)
-																				 
 
     def gather(mask, top_n=5):
-							   
-					
-							   
-					
-							   
-					
-							   
-					
-				
-
-					 
         pixels_sel = pixels[mask]
         if len(pixels_sel) == 0:
             return []
         # Convert cluster share (relative to this subset) into a global share of all pixels
         subset_ratio = len(pixels_sel) / len(pixels)
-										   
         results = get_top_colors_kmeans(pixels_sel, top_n=top_n)
         for r in results:
             r['percent'] *= subset_ratio
         return results
 
     results = {
-        'black': {'hex': '#000000', 'percent': black_pct, 'rgb': (0, 0, 0)},
-        'white': {'hex': '#ffffff', 'percent': white_pct, 'rgb': (255, 255, 255)},
+        'black': ({'hex': '#000000', 'percent': black_pct, 'rgb': (0, 0, 0)} if black_pct > 0.01 else None),
+        'white': ({'hex': '#ffffff', 'percent': white_pct, 'rgb': (255, 255, 255)} if white_pct > 0.01 else None),
         'red': gather(red_mask),
-									  
-									  
         'green': gather(green_mask),
-								  
         'blue': gather(blue_mask),
-									  
     }
     return results
 
@@ -660,18 +589,10 @@ with st.sidebar:
                 # Add colored categories
                 for color_info in hsv_colors['red']:
                     all_found_colors.append(('Rot', color_info))
-													   
-																   
-													   
-																 
                 for color_info in hsv_colors['green']:
                     all_found_colors.append(('Grün', color_info))
-													 
-																 
                 for color_info in hsv_colors['blue']:
                     all_found_colors.append(('Blau', color_info))
-													   
-																 
                 
                 # Store in session state
                 st.session_state.all_found_colors = all_found_colors
@@ -1048,15 +969,6 @@ if generate_button:
         st.session_state["group_orders"] = group_orders
         
         with st.spinner("Preprocessing (takes about 10-20 seconds) ..."):
-							  
-									
-																			
-								 
-												   
-															  
-												
-				 
-
             # Set up parameters
             args = ThreadArtColorParams(
                 name=name,
@@ -1073,7 +985,6 @@ if generate_button:
                 group_orders=group_orders,
                 image=image,
                 step_size=preset_step_size or 1.618,  # golden ratio for the lulz
-								
             )
 
             # Create image object
@@ -1181,50 +1092,6 @@ if st.session_state.generated_html:
 
     # Pin visualization
     st.subheader("📍 Pins (Nägel/Hooks)")
-    pins_use_hangers = st.checkbox(
-        "🔧 Haken verwenden (statt Nägel)",
-        value=True,
-        key="pins_use_hangers",
-        help="Aktiviert: 1 Haken = 2 Nodes (L/R). Deaktiviert: 1 Nagel = 1 Node",
-    )
-														 
-					 
-									   
-									  
-						  
-						   
-								  
-					
-																		  
-		 
-					 
-									 
-							
-						
-						 
-					
-				   
-															 
-		 
-					 
-									
-						   
-						 
-						  
-					  
-				   
-																	   
-		 
-									 
-								
-				   
-																	   
-	 
-								  
-									  
-				   
-																			   
-	 
     if st.button("Show pins", key="show_pins"):
         try:
             pins_d_coords = st.session_state.get("pins_d_coords")
@@ -1236,47 +1103,20 @@ if st.session_state.generated_html:
             if not pins_d_coords or pins_n_nodes <= 0 or pins_base_x <= 0 or pins_base_y <= 0:
                 st.warning("No pin data available yet. Generate the thread art first.")
             else:
-																		  
                 out_w = int(html_width)
                 out_h = int(out_w * (pins_base_y / pins_base_x))
-																				  
-											 
-											 
                 sx = out_w / pins_base_x
                 sy = out_h / pins_base_y
 
-																	   
                 pin_r = max(2.0, out_w * 0.004)
                 stroke_w = max(0.8, out_w * 0.0012)
                 font_size = max(8, int(out_w * 0.015))
                 text_dy = font_size * 0.35
 
-									  
-											   
-											  
-												   
-												 
-												
-													 
-											   
-												   
-					 
-										 
-											 
-											   
-												 
-												   
-											   
-												
-												   
-
                 svg_lines = [
                     f'<svg xmlns="http://www.w3.org/2000/svg" width="{out_w}" height="{out_h}" viewBox="0 0 {out_w} {out_h}">',
                     f'<rect width="{out_w}" height="{out_h}" fill="rgb(0,0,0)"/>'
                 ]
-								 
-																							   
-				 
 
                 # Outline to match chosen shape; for square images ellipse becomes a circle naturally.
                 if str(pins_shape) == "Ellipse":
@@ -1294,7 +1134,7 @@ if st.session_state.generated_html:
                         f'stroke="rgb(90,90,90)" stroke-width="{stroke_w:.2f}" fill="none"/>'
                     )
 
-                # Always draw all nodes as circles (these are the algorithmic nodes)
+                # Pins: label pin 1 and then every 5th (1, 5, 10, 15, ...)
                 for idx in range(pins_n_nodes):
                     coord = pins_d_coords.get(idx)
                     if coord is None:
@@ -1308,145 +1148,12 @@ if st.session_state.generated_html:
                         f'fill="rgb(255,0,0)" stroke="rgb(200,0,0)" stroke-width="{stroke_w:.2f}"/>'
                     )
 
-                if pins_use_hangers:
-                    # Hooks: 1 hook = 2 nodes (L/R). Label hook 1 and then every 5th hook.
-                    if (pins_n_nodes % 2) != 0:
-                        st.warning("Ungültige Node-Anzahl für Haken-Modus (muss gerade sein). Zeige Nagel-Nummern.")
-                        pins_use_hangers = False
-                    else:
-                        n_hooks = pins_n_nodes // 2
-                        cx0 = out_w / 2
-                        cy0 = out_h / 2
-                        for hook_idx in range(n_hooks):
-                            hook_no = hook_idx + 1
-                            if not (hook_no == 1 or (hook_no % 5) == 0):
-                                continue
-
-                            a = 2 * hook_idx
-                            b = a + 1
-                            ca = pins_d_coords.get(a)
-                            cb = pins_d_coords.get(b)
-                            if ca is None or cb is None:
-                                continue
-
-                            ya, xa = float(ca[0]) * sy, float(ca[1]) * sx
-                            yb, xb = float(cb[0]) * sy, float(cb[1]) * sx
-                            mx = (xa + xb) / 2
-                            my = (ya + yb) / 2
-
-                            # Offset label slightly outward so it doesn't sit on the hook itself
-                            vx = mx - cx0
-                            vy = my - cy0
-                            norm = (vx * vx + vy * vy) ** 0.5
-                            if norm > 1e-6:
-                                off = pin_r * 2.2
-                                lx = mx + off * (vx / norm)
-                                ly = my + off * (vy / norm)
-                            else:
-                                lx, ly = mx, my
-
-																				 
-										
-										
-															 
-												   
-														  
-												 
-                            svg_lines.append(
-                                f'<text x="{lx:.1f}" y="{(ly + text_dy):.1f}" text-anchor="middle" '
-                                f'fill="rgb(255,255,255)" font-size="{font_size}" font-weight="700">{hook_no}</text>'
-                            )
-											 
-																																	
-																																									   
-							 
-													
-
-																							 
-											   
-													
-													
-														  
-								
-																	 
-												 
-																										   
-								 
-												 
-												 
-																																		
-																																			
-								 
-													 
-												 
-																														
-																																			 
-								 
-														
-
-																			  
-												  
-																				 
-															   
-																 
-											   
-													 
-															   
-															   
-									 
-												   
-
-												 
-																										
-																														   
-								 
-
-                if not pins_use_hangers:
-                    # Nails: label node 1 and then every 5th node (1, 5, 10, 15, ...)
-                    for idx in range(pins_n_nodes):
-                        coord = pins_d_coords.get(idx)
-                        if coord is None:
-                            continue
-                        y0, x0 = float(coord[0]), float(coord[1])
-                        x_px = x0 * sx
-                        y_px = y0 * sy
-                        pin_no = idx + 1
-
-													  
-									   
-									   
-													  
-														 
-
-													 
-											
-											
-												  
-						
-										 
-																									   
-						 
-										 
-																															
-																																  
-						 
-												
-
-																		  
-                        if pin_no == 1 or (pin_no % 5) == 0:
-														   
-															 
-										   
-												 
-															 
-															 
-								 
-												   
-							
-                            svg_lines.append(
-                                f'<text x="{x_px:.1f}" y="{(y_px + text_dy):.1f}" text-anchor="middle" '
-                                f'fill="rgb(255,255,255)" font-size="{font_size}" font-weight="700">{pin_no}</text>'
-                            )
+                    pin_no = idx + 1
+                    if pin_no == 1 or (pin_no % 5) == 0:
+                        svg_lines.append(
+                            f'<text x="{x_px:.1f}" y="{(y_px + text_dy):.1f}" text-anchor="middle" '
+                            f'fill="rgb(255,255,255)" font-size="{font_size}" font-weight="700">{pin_no}</text>'
+                        )
 
                 svg_lines.append("</svg>")
                 pins_svg = "\n".join(svg_lines)
@@ -1455,7 +1162,7 @@ if st.session_state.generated_html:
                 st.download_button(
                     label="Download pins SVG",
                     data=pins_svg.encode("utf-8"),
-                    file_name=f"{name or 'thread_art'}_{'hooks' if pins_use_hangers else 'nails'}_pins.svg",
+                    file_name=f"{name or 'thread_art'}_pins.svg",
                     mime="image/svg+xml",
                 )
         except Exception as e:
