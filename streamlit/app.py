@@ -74,6 +74,43 @@ def rgb_to_hsv(img_rgb):
     hsv = np.stack([h, s, v], axis=-1)
     return hsv
 
+def rgb_to_lab(img_rgb):
+    """Convert RGB (0-255) to CIE Lab (D65). Accepts shape (..., 3)."""
+    arr = img_rgb.astype(np.float32) / 255.0
+
+    # sRGB to linear RGB
+    mask = arr <= 0.04045
+    arr_lin = np.where(mask, arr / 12.92, ((arr + 0.055) / 1.055) ** 2.4)
+
+    r = arr_lin[..., 0]
+    g = arr_lin[..., 1]
+    b = arr_lin[..., 2]
+
+    # linear RGB to XYZ (D65)
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+
+    # Normalize by reference white
+    x /= 0.95047
+    z /= 1.08883
+
+    epsilon = 216 / 24389
+    kappa = 24389 / 27
+
+    def f(t):
+        return np.where(t > epsilon, np.cbrt(t), (kappa * t + 16) / 116)
+
+    fx = f(x)
+    fy = f(y)
+    fz = f(z)
+
+    l_val = 116 * fy - 16
+    a_val = 500 * (fx - fy)
+    b_val = 200 * (fy - fz)
+
+    return np.stack([l_val, a_val, b_val], axis=-1)
+
 def hue_in_ranges(hue_array, ranges_deg):
     """hue_array in [0,1]. ranges_deg is list of (min_deg, max_deg) - may include negative for wrap."""
     h_deg = (hue_array * 360.0) % 360.0
@@ -88,7 +125,7 @@ def hue_in_ranges(hue_array, ranges_deg):
     return mask
 
 def get_top_colors_kmeans(pixels_rgb, top_n=3):
-    """Extract top N colors from pixels using KMeans"""
+    """Extract top N colors from pixels using KMeans in Lab space."""
     if len(pixels_rgb) == 0:
         return []
     # Limit sample size
@@ -100,18 +137,32 @@ def get_top_colors_kmeans(pixels_rgb, top_n=3):
     else:
         sample = pixels_rgb
 
+    sample_f = sample.astype(np.float32)
+    pixels_f = pixels_rgb.astype(np.float32)
+    sample_lab = rgb_to_lab(sample_f)
+    pixels_lab = rgb_to_lab(pixels_f)
+
     k = min(top_n, len(sample))
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-    kmeans.fit(sample)
-    centers = np.clip(kmeans.cluster_centers_.astype(int), 0, 255)
-    labels = kmeans.predict(pixels_rgb)
+    kmeans.fit(sample_lab)
+    centers = kmeans.cluster_centers_
+    labels = kmeans.predict(pixels_lab)
     results = []
     total = len(pixels_rgb)
+    sample_labels = kmeans.labels_
     for i, center in enumerate(centers):
         cnt = int((labels == i).sum())
         percent = cnt / total
-        hexcol = '#{:02x}{:02x}{:02x}'.format(int(center[0]), int(center[1]), int(center[2]))
-        results.append({'hex': hexcol, 'percent': percent, 'rgb': tuple(center)})
+        cluster_points_lab = sample_lab[sample_labels == i]
+        cluster_points_rgb = sample_f[sample_labels == i]
+        if len(cluster_points_lab) == 0:
+            continue
+        diffs = cluster_points_lab - center
+        medoid_idx = int(np.argmin(np.sum(diffs * diffs, axis=1)))
+        medoid = cluster_points_rgb[medoid_idx]
+        rgb = np.clip(np.rint(medoid), 0, 255).astype(int)
+        hexcol = '#{:02x}{:02x}{:02x}'.format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        results.append({'hex': hexcol, 'percent': percent, 'rgb': tuple(rgb.tolist())})
     results.sort(key=lambda x: x['percent'], reverse=True)
     return results
 
@@ -148,27 +199,47 @@ def extract_colors_hsv(image_pil):
     non_grey_mask = ~(black_mask | white_mask)
 
     # Hue ranges
-    red_mask = hue_in_ranges(h, [(-20, 20)]) & non_grey_mask & (s >= MIN_SAT)
+    red_mask = hue_in_ranges(h, [(-20, 20), (320, 360)]) & non_grey_mask & (s >= MIN_SAT)
+    orange_mask = hue_in_ranges(h, [(20, 40)]) & non_grey_mask & (s >= MIN_SAT)
+    yellow_mask = hue_in_ranges(h, [(40, 60)]) & non_grey_mask & (s >= MIN_SAT)
     green_mask = hue_in_ranges(h, [(60, 170)]) & non_grey_mask & (s >= MIN_SAT)
-    blue_mask = hue_in_ranges(h, [(200, 280)]) & non_grey_mask & (s >= MIN_SAT)
+    cyan_mask = hue_in_ranges(h, [(170, 200)]) & non_grey_mask & (s >= MIN_SAT)
+    blue_mask = hue_in_ranges(h, [(200, 250)]) & non_grey_mask & (s >= MIN_SAT)
+    purple_mask = hue_in_ranges(h, [(250, 320)]) & non_grey_mask & (s >= MIN_SAT)
 
-    def gather(mask, top_n=5):
+    def dynamic_top_n(subset_ratio):
+        if subset_ratio < 0.01:
+            return 1
+        if subset_ratio < 0.03:
+            return 2
+        if subset_ratio < 0.08:
+            return 3
+        if subset_ratio < 0.15:
+            return 4
+        return 5
+
+    def gather(mask):
         pixels_sel = pixels[mask]
         if len(pixels_sel) == 0:
             return []
         # Convert cluster share (relative to this subset) into a global share of all pixels
         subset_ratio = len(pixels_sel) / len(pixels)
+        top_n = dynamic_top_n(subset_ratio)
         results = get_top_colors_kmeans(pixels_sel, top_n=top_n)
         for r in results:
             r['percent'] *= subset_ratio
         return results
 
     results = {
-        'black': ({'hex': '#000000', 'percent': black_pct, 'rgb': (0, 0, 0)} if black_pct > 0.01 else None),
-        'white': ({'hex': '#ffffff', 'percent': white_pct, 'rgb': (255, 255, 255)} if white_pct > 0.01 else None),
+        'black': {'hex': '#000000', 'percent': black_pct, 'rgb': (0, 0, 0)},
+        'white': {'hex': '#ffffff', 'percent': white_pct, 'rgb': (255, 255, 255)},
         'red': gather(red_mask),
+        'orange': gather(orange_mask),
+        'yellow': gather(yellow_mask),
         'green': gather(green_mask),
+        'cyan': gather(cyan_mask),
         'blue': gather(blue_mask),
+        'purple': gather(purple_mask),
     }
     return results
 
@@ -226,6 +297,9 @@ def decompose_image(img_obj, n_lines_total=10000):
             render_color_line(pal[k], k.ljust(max_len_color_name), n_lines_per_color[idx])
 
         st.code(f"`n_lines_per_color` for you to copy: {n_lines_per_color}")
+        
+        # Speichere n_lines_per_color für "Vorschlag übernehmen"
+        return n_lines_per_color
 
     # Case B: palette is a list of tuples
     elif isinstance(pal, (list, tuple)):
@@ -252,10 +326,13 @@ def decompose_image(img_obj, n_lines_total=10000):
             render_color_line(c, f"Color {idx+1}", n_lines_per_color[idx])
 
         st.code(f"`n_lines_per_color` for you to copy: {n_lines_per_color}")
+        
+        # Speichere n_lines_per_color für "Vorschlag übernehmen"
+        return n_lines_per_color
 
     else:
         st.warning("Unrecognized palette format. Expected dict or list of RGB tuples.")
-        return
+        return None
 # ------------------------------------------------------------------
 
 # Apply custom CSS for a clean, minimalist look
@@ -562,38 +639,71 @@ with st.sidebar:
         )
         
         # === Neue HSV-basierte Farberkennung mit Checkbox-Selection ===
-        try:
-            hsv_colors = extract_colors_hsv(image)
-            
-            # Flatten all colors into one list with category info
-            all_found_colors = []
-            
-            # Add black & white if present
-            if hsv_colors['black']:
-                all_found_colors.append(('Schwarz', hsv_colors['black']))
-            if hsv_colors['white']:
-                all_found_colors.append(('Weiß', hsv_colors['white']))
-            
-            # Add colored categories
-            for color_info in hsv_colors['red']:
-                all_found_colors.append(('Rot', color_info))
-            for color_info in hsv_colors['green']:
-                all_found_colors.append(('Grün', color_info))
-            for color_info in hsv_colors['blue']:
-                all_found_colors.append(('Blau', color_info))
-            
-            # Store in session state
-            st.session_state.all_found_colors = all_found_colors
-            
-            # Initialize checkbox states
-            if "color_checkbox_states" not in st.session_state:
-                st.session_state.color_checkbox_states = [True] * len(all_found_colors)
-                
-        except Exception as e:
-            st.session_state.all_found_colors = []
-            st.session_state.color_checkbox_states = []
+        # Only recompute if image changed (hash the bytes to detect changes)
+        import hashlib
+        image_hash = hashlib.md5(image_bytes).hexdigest()
+        image_changed = st.session_state.get("last_image_hash") != image_hash
         
-        else:
+        if image_changed:
+            try:
+                hsv_colors = extract_colors_hsv(image)
+																		 
+								   
+																	   
+			
+									
+												
+															
+												  
+															  
+												 
+															 
+			
+									
+																
+			
+										
+															   
+																					   
+                
+                # Flatten all colors into one list with category info
+                all_found_colors = []
+                
+                # Add black & white if present
+                if hsv_colors['black']:
+                    all_found_colors.append(('Schwarz', hsv_colors['black']))
+                if hsv_colors['white']:
+                    all_found_colors.append(('Weiß', hsv_colors['white']))
+                
+                # Add colored categories
+                for color_info in hsv_colors['red']:
+                    all_found_colors.append(('Rot', color_info))
+                for color_info in hsv_colors['orange']:
+                    all_found_colors.append(('Orange', color_info))
+                for color_info in hsv_colors['yellow']:
+                    all_found_colors.append(('Gelb', color_info))
+                for color_info in hsv_colors['green']:
+                    all_found_colors.append(('Grün', color_info))
+                for color_info in hsv_colors['cyan']:
+                    all_found_colors.append(('Cyan', color_info))
+                for color_info in hsv_colors['blue']:
+                    all_found_colors.append(('Blau', color_info))
+                for color_info in hsv_colors['purple']:
+                    all_found_colors.append(('Lila', color_info))
+                
+                # Store in session state
+                st.session_state.all_found_colors = all_found_colors
+                st.session_state.last_image_hash = image_hash
+                
+                # Initialize checkbox states (alle Farben sind initial ausgewählt)
+                st.session_state.color_checkbox_states = [True] * len(all_found_colors)
+                    
+            except Exception as e:
+                st.session_state.all_found_colors = []
+                st.session_state.color_checkbox_states = []
+        
+        # Falls noch keine Farben geladen, verwende decompose_data fallback
+        if not st.session_state.get("all_found_colors"):
             # For demo images or when color detection is not available
             dd = st.session_state.get("decompose_data")
             if dd:
@@ -651,8 +761,14 @@ with st.sidebar:
 
         # =======================================================================================================
             # Prefill widgets from suggested palette/lines if they are not already set in session_state
+            # WICHTIG: Nur ausführen wenn NICHT durch "Vorschlag generieren" Button befüllt wurde
+            # (User soll explizit "Vorschlag übernehmen" klicken)
         try:
-            if 'preset_palette' in locals() and preset_palette:
+            # Prefill nur wenn nicht durch "Vorschlag generieren" ausgelöst
+            skip_prefill = st.session_state.get("skip_prefill_after_suggestion", False)
+            is_from_button = st.session_state.get("decompose_data") and not preset_palette
+            
+            if 'preset_palette' in locals() and preset_palette and not is_from_button and not skip_prefill:
                 for i, col in enumerate(preset_palette):
                     # color picker expects hex string
                     hex_col = f"#{int(col[0]):02x}{int(col[1]):02x}{int(col[2]):02x}"
@@ -702,7 +818,9 @@ with st.sidebar:
             step=20,
             help="Number of nodes on the perimeter of the image to generate lines between. This increases resolution but also time to create the image.",
         )
-        n_nodes_real = n_nodes + (4 - n_nodes % 4)  # Ensure n_nodes is a multiple of 4
+        # Ensure n_nodes is a multiple of 4, but don't add an extra 4 when already divisible
+        n_nodes_real = n_nodes if (n_nodes % 4 == 0) else n_nodes + (4 - n_nodes % 4)
+        st.session_state["n_nodes_real"] = n_nodes_real  # Store for later use in PDF export
     with col3:
         shape = st.selectbox(
             "Shape",
@@ -731,7 +849,12 @@ with st.sidebar:
 
         # Initialize group_orders in session_state if not set
         if "group_orders_input" not in st.session_state:
-            st.session_state["group_orders_input"] = preset_group_orders or "4"
+            st.session_state["group_orders_input"] = preset_group_orders or "2,3,4,1,3,2,1"
+        
+        # Apply optimized group_orders if available (from Auto-Optimize button)
+        if st.session_state.get("apply_optimized_orders", False):
+            st.session_state["group_orders_input"] = st.session_state.get("optimized_group_orders", st.session_state["group_orders_input"])
+            st.session_state["apply_optimized_orders"] = False
         
         group_orders = st.text_input(
             "Group Orders",
