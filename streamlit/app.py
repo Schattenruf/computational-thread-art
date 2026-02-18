@@ -36,12 +36,304 @@ if parent_dir not in sys.path:
 #         for subpath in path.iterdir():
 #             st.write("sub: ", subpath)
 
-os.chdir(parent_dir)
+#os.chdir(parent_dir)
 
 gc.collect()
 
 from image_color import Img, ThreadArtColorParams
 from streamlit.components.v1 import html as st_html
+
+# ===== HSV-basierte Farberkennung (aus color_extractor.py) =====
+def rgb_to_hsv(img_rgb):
+    """Vectorized RGB->HSV conversion. Input uint8 RGB image, returns H,S,V in [0,1]."""
+    arr = img_rgb.astype('float32') / 255.0
+    r = arr[..., 0]
+    g = arr[..., 1]
+    b = arr[..., 2]
+    maxc = np.max(arr, axis=-1)
+    minc = np.min(arr, axis=-1)
+    v = maxc
+    delta = maxc - minc
+    # Fix division by zero warning
+    s = np.divide(delta, maxc, out=np.zeros_like(delta), where=maxc!=0)
+
+    h = np.zeros_like(maxc)
+    mask = delta != 0
+    # Where max is r
+    idx = (maxc == r) & mask
+    h[idx] = ( (g[idx] - b[idx]) / delta[idx] ) % 6
+    # Where max is g
+    idx = (maxc == g) & mask
+    h[idx] = ( (b[idx] - r[idx]) / delta[idx] ) + 2
+    # Where max is b
+    idx = (maxc == b) & mask
+    h[idx] = ( (r[idx] - g[idx]) / delta[idx] ) + 4
+
+    h = h / 6.0  # now in [0,1]
+    h[~mask] = 0.0
+    hsv = np.stack([h, s, v], axis=-1)
+    return hsv
+
+def rgb_to_lab(img_rgb):
+    """Convert RGB (0-255) to CIE Lab (D65). Accepts shape (..., 3)."""
+    arr = img_rgb.astype(np.float32) / 255.0
+
+    # sRGB to linear RGB
+    mask = arr <= 0.04045
+    arr_lin = np.where(mask, arr / 12.92, ((arr + 0.055) / 1.055) ** 2.4)
+
+    r = arr_lin[..., 0]
+    g = arr_lin[..., 1]
+    b = arr_lin[..., 2]
+
+    # linear RGB to XYZ (D65)
+    x = r * 0.4124564 + g * 0.3575761 + b * 0.1804375
+    y = r * 0.2126729 + g * 0.7151522 + b * 0.0721750
+    z = r * 0.0193339 + g * 0.1191920 + b * 0.9503041
+
+    # Normalize by reference white
+    x /= 0.95047
+    z /= 1.08883
+
+    epsilon = 216 / 24389
+    kappa = 24389 / 27
+
+    def f(t):
+        return np.where(t > epsilon, np.cbrt(t), (kappa * t + 16) / 116)
+
+    fx = f(x)
+    fy = f(y)
+    fz = f(z)
+
+    l_val = 116 * fy - 16
+    a_val = 500 * (fx - fy)
+    b_val = 200 * (fy - fz)
+
+    return np.stack([l_val, a_val, b_val], axis=-1)
+
+def hue_in_ranges(hue_array, ranges_deg):
+    """hue_array in [0,1]. ranges_deg is list of (min_deg, max_deg) - may include negative for wrap."""
+    h_deg = (hue_array * 360.0) % 360.0
+    mask = np.zeros(h_deg.shape, dtype=bool)
+    for (mn, mx) in ranges_deg:
+        mn_norm = mn % 360
+        mx_norm = mx % 360
+        if mn_norm <= mx_norm:
+            mask |= (h_deg >= mn_norm) & (h_deg <= mx_norm)
+        else:
+            mask |= (h_deg >= mn_norm) | (h_deg <= mx_norm)
+    return mask
+
+def get_top_colors_kmeans(pixels_rgb, top_n=3):
+    """Extract top N colors from pixels using KMeans in Lab space."""
+    if len(pixels_rgb) == 0:
+        return []
+    # Limit sample size
+    max_pixels = 100000
+    n_samples = min(len(pixels_rgb), max_pixels)
+    if len(pixels_rgb) > n_samples:
+        idx = np.random.choice(len(pixels_rgb), n_samples, replace=False)
+        sample = pixels_rgb[idx]
+    else:
+        sample = pixels_rgb
+
+    sample_f = sample.astype(np.float32)
+    pixels_f = pixels_rgb.astype(np.float32)
+    sample_lab = rgb_to_lab(sample_f)
+    pixels_lab = rgb_to_lab(pixels_f)
+
+    k = min(top_n, len(sample))
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    kmeans.fit(sample_lab)
+    centers = kmeans.cluster_centers_
+    labels = kmeans.predict(pixels_lab)
+    results = []
+    total = len(pixels_rgb)
+    sample_labels = kmeans.labels_
+    for i, center in enumerate(centers):
+        cnt = int((labels == i).sum())
+        percent = cnt / total
+        cluster_points_lab = sample_lab[sample_labels == i]
+        cluster_points_rgb = sample_f[sample_labels == i]
+        if len(cluster_points_lab) == 0:
+            continue
+        diffs = cluster_points_lab - center
+        medoid_idx = int(np.argmin(np.sum(diffs * diffs, axis=1)))
+        medoid = cluster_points_rgb[medoid_idx]
+        rgb = np.clip(np.rint(medoid), 0, 255).astype(int)
+        hexcol = '#{:02x}{:02x}{:02x}'.format(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        results.append({'hex': hexcol, 'percent': percent, 'rgb': tuple(rgb.tolist())})
+    results.sort(key=lambda x: x['percent'], reverse=True)
+    return results
+
+def extract_colors_hsv(image_pil):
+    """Extract colors from image using HSV-based categorization"""
+    # Resize if too large
+    arr = np.array(image_pil.convert('RGB'))
+    H, W = arr.shape[:2]
+    max_side = 1000
+    if max(H, W) > max_side:
+        scale = max_side / max(H, W)
+        image_pil = image_pil.resize((int(W*scale), int(H*scale)), Image.LANCZOS)
+    
+    arr = np.array(image_pil.convert('RGB'))
+    pixels = arr.reshape(-1, 3)
+    hsv = rgb_to_hsv(arr).reshape(-1, 3)
+    h = hsv[:, 0]
+    s = hsv[:, 1]
+    v = hsv[:, 2]
+
+    # Thresholds
+    BLACK_V_THRESHOLD = 0.15
+    WHITE_V_THRESHOLD = 0.92
+    WHITE_S_THRESHOLD = 0.18
+    MIN_SAT = 0.12
+
+    # Black & white
+    black_mask = v <= BLACK_V_THRESHOLD
+    white_mask = (v >= WHITE_V_THRESHOLD) & (s <= WHITE_S_THRESHOLD)
+    black_pct = black_mask.mean()
+    white_pct = white_mask.mean()
+
+    # Colored pixels
+    non_grey_mask = ~(black_mask | white_mask)
+
+    # Hue ranges
+    red_mask = hue_in_ranges(h, [(-20, 20), (320, 360)]) & non_grey_mask & (s >= MIN_SAT)
+    orange_mask = hue_in_ranges(h, [(20, 40)]) & non_grey_mask & (s >= MIN_SAT)
+    yellow_mask = hue_in_ranges(h, [(40, 60)]) & non_grey_mask & (s >= MIN_SAT)
+    green_mask = hue_in_ranges(h, [(60, 170)]) & non_grey_mask & (s >= MIN_SAT)
+    cyan_mask = hue_in_ranges(h, [(170, 200)]) & non_grey_mask & (s >= MIN_SAT)
+    blue_mask = hue_in_ranges(h, [(200, 250)]) & non_grey_mask & (s >= MIN_SAT)
+    purple_mask = hue_in_ranges(h, [(250, 320)]) & non_grey_mask & (s >= MIN_SAT)
+
+    def dynamic_top_n(subset_ratio):
+        if subset_ratio < 0.01:
+            return 1
+        if subset_ratio < 0.03:
+            return 2
+        if subset_ratio < 0.08:
+            return 3
+        if subset_ratio < 0.15:
+            return 4
+        return 5
+
+    def gather(mask):
+        pixels_sel = pixels[mask]
+        if len(pixels_sel) == 0:
+            return []
+        # Convert cluster share (relative to this subset) into a global share of all pixels
+        subset_ratio = len(pixels_sel) / len(pixels)
+        top_n = dynamic_top_n(subset_ratio)
+        results = get_top_colors_kmeans(pixels_sel, top_n=top_n)
+        for r in results:
+            r['percent'] *= subset_ratio
+        return results
+
+    results = {
+        'black': {'hex': '#000000', 'percent': black_pct, 'rgb': (0, 0, 0)},
+        'white': {'hex': '#ffffff', 'percent': white_pct, 'rgb': (255, 255, 255)},
+        'red': gather(red_mask),
+        'orange': gather(orange_mask),
+        'yellow': gather(yellow_mask),
+        'green': gather(green_mask),
+        'cyan': gather(cyan_mask),
+        'blue': gather(blue_mask),
+        'purple': gather(purple_mask),
+    }
+    return results
+
+# --- Neue Hilfsfunktion: decompose_image (angepasst für Streamlit) ---
+def decompose_image(img_obj, n_lines_total=10000):
+    """
+    Prints / displays a suggested number of lines per color based on the color histogram.
+    Adapted from a Jupyter-style snippet to Streamlit.
+
+    Args:
+        img_obj: object that should provide .palette and .color_histogram
+                 - palette can be a dict: {name: (r,g,b), ...} or a list of (r,g,b)
+                 - color_histogram can be a dict mapping color-name -> frequency (0..1),
+                   or a list of frequencies matching a palette list
+        n_lines_total: total number of lines to distribute
+    """
+    pal = getattr(img_obj, "palette", None)
+    hist = getattr(img_obj, "color_histogram", None)
+
+    if pal is None or hist is None:
+        st.warning("Cannot compute suggestions: object lacks 'palette' or 'color_histogram' attributes.")
+        return
+
+    def render_color_line(color_tuple, name_str, n_lines):
+        r, g, b = tuple(int(c) for c in color_tuple)
+        color_string = str((r, g, b))
+        # Build an HTML line with a color swatch
+        swatch = f"<span style='display:inline-block;width:64px;height:16px;background:rgb{(r,g,b)};border:1px solid #333;margin:0 8px;vertical-align:middle'></span>"
+        text = f"<code>{color_string.ljust(18)}</code>{swatch}<code>{name_str}</code> = {n_lines}"
+        st.markdown(text, unsafe_allow_html=True)
+
+    # Case A: palette is a dict (name -> (r,g,b))
+    if isinstance(pal, dict):
+        # Compute n_lines per palette key order
+        keys = list(pal.keys())
+        # histogram expected to map same keys to frequencies (0..1)
+        try:
+            n_lines_per_color = [int(hist.get(k, 0) * n_lines_total) for k in keys]
+        except Exception:
+            st.warning("Unexpected format for color_histogram; expected dict mapping color-name -> frequency.")
+            return
+
+        # Identify index to absorb rounding remainder.
+        try:
+            sums = [sum(tuple(pal[k])) for k in keys]
+            darkest_idx = sums.index(max(sums))
+        except Exception:
+            darkest_idx = 0
+
+        n_lines_per_color[darkest_idx] += (n_lines_total - sum(n_lines_per_color))
+
+        # Display per-color suggestion
+        max_len_color_name = max(len(k) for k in keys) if keys else 0
+        for idx, k in enumerate(keys):
+            render_color_line(pal[k], k.ljust(max_len_color_name), n_lines_per_color[idx])
+
+        st.code(f"`n_lines_per_color` for you to copy: {n_lines_per_color}")
+        
+        # Speichere n_lines_per_color für "Vorschlag übernehmen"
+        return n_lines_per_color
+
+    # Case B: palette is a list of tuples
+    elif isinstance(pal, (list, tuple)):
+        # histogram might be a list/tuple of frequencies with same length
+        if not isinstance(hist, (list, tuple)):
+            st.warning("Palette is a list but color_histogram is not a list/tuple; cannot reliably map.")
+            return
+
+        if len(hist) != len(pal):
+            st.warning("Length mismatch between palette and histogram; cannot reliably compute distribution.")
+            return
+
+        n_lines_per_color = [int(h * n_lines_total) for h in hist]
+
+        try:
+            sums = [sum(tuple(c)) for c in pal]
+            darkest_idx = sums.index(max(sums))
+        except Exception:
+            darkest_idx = 0
+
+        n_lines_per_color[darkest_idx] += (n_lines_total - sum(n_lines_per_color))
+
+        for idx, c in enumerate(pal):
+            render_color_line(c, f"Color {idx+1}", n_lines_per_color[idx])
+
+        st.code(f"`n_lines_per_color` for you to copy: {n_lines_per_color}")
+        
+        # Speichere n_lines_per_color für "Vorschlag übernehmen"
+        return n_lines_per_color
+
+    else:
+        st.warning("Unrecognized palette format. Expected dict or list of RGB tuples.")
+        return None
+# ------------------------------------------------------------------
 
 # Apply custom CSS for a clean, minimalist look
 st.markdown(
