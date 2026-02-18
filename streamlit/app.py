@@ -800,7 +800,9 @@ with st.sidebar:
             step=20,
             help="Number of nodes on the perimeter of the image to generate lines between. This increases resolution but also time to create the image.",
         )
-        n_nodes_real = n_nodes + (4 - n_nodes % 4)  # Ensure n_nodes is a multiple of 4
+        # Ensure n_nodes is a multiple of 4, but don't add an extra 4 when already divisible
+        n_nodes_real = n_nodes if (n_nodes % 4 == 0) else n_nodes + (4 - n_nodes % 4)
+        st.session_state["n_nodes_real"] = n_nodes_real  # Store for later use in PDF export
     with col3:
         shape = st.selectbox(
             "Shape",
@@ -827,9 +829,18 @@ with st.sidebar:
             help="Amount we blur the monochrome images when we split them off from the main image. You can try increasing this if the lines seem too sharp and you want the color gradients to be smoother, but mostly this doesn't have a big effect on the final output.",
         )
 
+        # Initialize group_orders in session_state if not set
+        if "group_orders_input" not in st.session_state:
+            st.session_state["group_orders_input"] = preset_group_orders or "2,3,4,1,3,2,1"
+        
+        # Apply optimized group_orders if available (from Auto-Optimize button)
+        if st.session_state.get("apply_optimized_orders", False):
+            st.session_state["group_orders_input"] = st.session_state.get("optimized_group_orders", st.session_state["group_orders_input"])
+            st.session_state["apply_optimized_orders"] = False
+        
         group_orders = st.text_input(
             "Group Orders",
-            value=preset_group_orders or "4",
+            key="group_orders_input",
             help="""Sequence we'll use to layer the colored lines onto the image. If this is a comma-separated list of integers, they are interpreted as the indices of colors you've listed, e.g. if our colors were white, red and black then '1,2,1,2,3' means we'd add half the white lines (1), then half the red lines (2), then half the white again (1), then half the red again (2), then all the black lines on top (3). Alternatively, if you just enter a single number then this will be interpreted as a number of loops over all colors, e.g. for three colors, '4' would be interpreted as the sequence '1,2,3,1,2,3,1,2,3,1,2,3'.
 
 We have 2 main tips here: firstly make sure to include enough loops so that no one color dominates the other colors by going on top and masking them all, and secondly make sure the darker colors are on top since this looks a lot better (in particular, we strongly recommend having black on top).
