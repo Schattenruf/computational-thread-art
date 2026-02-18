@@ -651,14 +651,8 @@ with st.sidebar:
 
         # =======================================================================================================
             # Prefill widgets from suggested palette/lines if they are not already set in session_state
-            # WICHTIG: Nur ausführen wenn NICHT durch "Vorschlag generieren" Button befüllt wurde
-            # (User soll explizit "Vorschlag übernehmen" klicken)
         try:
-            # Prefill nur wenn nicht durch "Vorschlag generieren" ausgelöst
-            skip_prefill = st.session_state.get("skip_prefill_after_suggestion", False)
-            is_from_button = st.session_state.get("decompose_data") and not preset_palette
-            
-            if 'preset_palette' in locals() and preset_palette and not is_from_button and not skip_prefill:
+            if 'preset_palette' in locals() and preset_palette:
                 for i, col in enumerate(preset_palette):
                     # color picker expects hex string
                     hex_col = f"#{int(col[0]):02x}{int(col[1]):02x}{int(col[2]):02x}"
@@ -708,9 +702,7 @@ with st.sidebar:
             step=20,
             help="Number of nodes on the perimeter of the image to generate lines between. This increases resolution but also time to create the image.",
         )
-        # Ensure n_nodes is a multiple of 4, but don't add an extra 4 when already divisible
-        n_nodes_real = n_nodes if (n_nodes % 4 == 0) else n_nodes + (4 - n_nodes % 4)
-        st.session_state["n_nodes_real"] = n_nodes_real  # Store for later use in PDF export
+        n_nodes_real = n_nodes + (4 - n_nodes % 4)  # Ensure n_nodes is a multiple of 4
     with col3:
         shape = st.selectbox(
             "Shape",
@@ -942,9 +934,6 @@ if generate_button:
 
     # Display a status message
     try:
-        # Store group_orders in session_state for PDF export
-        st.session_state["group_orders"] = group_orders
-        
         with st.spinner("Preprocessing (takes about 10-20 seconds) ..."):
             # Set up parameters
             args = ThreadArtColorParams(
@@ -1054,124 +1043,39 @@ if st.session_state.generated_html:
     st_html(st.session_state.generated_html, height=html_height + 150, scrolling=True)
 
     # Download options
-    st.subheader("📥 Download Options")
+    st.subheader("Download Options")
 
     # Provide HTML download
     b64_html = base64.b64encode(st.session_state.generated_html.encode()).decode()
     href_html = f'<a href="data:text/html;base64,{b64_html}" download="{name}.html">Download HTML File</a>'
     st.markdown(href_html, unsafe_allow_html=True)
 
-    # Export line sequence (CSV / JSON / PDF)
+    # Export line sequence (CSV / JSON)
     if st.session_state.get("line_sequence"):
         seq = st.session_state.line_sequence
-        
-        col1, col2, col3 = st.columns(3)
-        
-        # CSV Export
-        with col1:
-            import io as _io
-            csv_buf = _io.StringIO()
-            csv_buf.write("step,color_index,color_hex,r,g,b,from_pin,to_pin\n")
-            for row in seq:
-                r, g, b = row["rgb"]
-                csv_buf.write(f"{row['step']},{row['color_index']},{row['color_hex']},{r},{g},{b},{row['from_pin']},{row['to_pin']}\n")
-            csv_bytes = csv_buf.getvalue().encode("utf-8")
-            st.download_button(
-                label="📊 CSV",
-                data=csv_bytes,
-                file_name=f"{name or 'thread_art'}_sequence.csv",
-                mime="text/csv",
-            )
+        # CSV
+        import io as _io
+        csv_buf = _io.StringIO()
+        csv_buf.write("step,color_index,color_hex,r,g,b,from_pin,to_pin\n")
+        for row in seq:
+            r, g, b = row["rgb"]
+            csv_buf.write(f"{row['step']},{row['color_index']},{row['color_hex']},{r},{g},{b},{row['from_pin']},{row['to_pin']}\n")
+        csv_bytes = csv_buf.getvalue().encode("utf-8")
+        st.download_button(
+            label="Export Line Sequence (CSV)",
+            data=csv_bytes,
+            file_name=f"{name or 'thread_art'}_sequence.csv",
+            mime="text/csv",
+        )
 
-        # JSON Export
-        with col2:
-            json_bytes = json.dumps(seq, ensure_ascii=False, indent=2).encode("utf-8")
-            st.download_button(
-                label="📄 JSON",
-                data=json_bytes,
-                file_name=f"{name or 'thread_art'}_sequence.json",
-                mime="application/json",
-            )
-        
-        # PDF Export (Picture Hangers)
-        with col3:
-            # Checkbox für Haken vs Nägel
-            use_hangers = st.checkbox(
-                "🔧 Haken verwenden (statt Nägel)", 
-                value=True,
-                help="Aktiviert: 1 Haken = 2 Nodes (L/R). Deaktiviert: 1 Nagel = 1 Node"
-            )
-            
-            if st.button("🖨️ Generate PDF Instructions", key="gen_pdf"):
-                try:
-                    from pdf_export import export_to_pdf
-                    
-                    # Get color information with debug
-                    detected_colors = st.session_state.get("all_found_colors", [])
-                    # all_found_colors is a list of tuples: (category_name, color_info_dict)
-                    color_names = [category for category, color_info in detected_colors]
-                    color_info_list = [color_info for category, color_info in detected_colors]
-                    group_orders = st.session_state.get("group_orders", "")
-                    n_nodes = st.session_state.get("n_nodes_real", 320)
-                    
-                    # Debug info display
-                    with st.expander("🔍 Debug Info", expanded=False):
-                        st.write(f"**line_sequence**: {len(seq)} entries")
-                        if seq and len(seq) > 0:
-                            st.write(f"**First entry type**: {type(seq[0])}")
-                            st.write(f"**First entry**: {seq[0]}")
-                            # Quick glance at the first 20 colors in the sequence
-                            first_colors = [row.get("color_hex", "") for row in seq[:20]]
-                            st.write(f"**First 20 color_hex**: {first_colors}")
-                            # Order of colors by first appearance (hex-based)
-                            color_order = []
-                            for row in seq:
-                                hx = str(row.get("color_hex", "")).lower()
-                                if hx and hx not in color_order:
-                                    color_order.append(hx)
-                                if len(color_order) > 20:
-                                    break
-                            st.write(f"**Color order (first appearance)**: {color_order}")
-                        st.write(f"**color_names**: {color_names}")
-                        st.write(f"**group_orders**: `{repr(group_orders)}`")
-                        st.write(f"**n_nodes**: {n_nodes}")
-                    
-                    # Generate PDF
-                    output_path = f"outputs_drawing/{name or 'thread_art'}_instructions"
-                    pdf_path = export_to_pdf(
-                        line_sequence=seq,
-                        color_names=color_names,
-                        color_info_list=color_info_list,
-                        group_orders=group_orders,
-                        output_path=output_path,
-                        n_nodes=n_nodes,
-                        num_cols=3,
-                        num_rows=18,
-                        include_stats=True,
-                        version="n+1",
-                        use_hangers=use_hangers
-                    )
-                    
-                    if pdf_path and os.path.exists(pdf_path):
-                        with open(pdf_path, "rb") as f:
-                            pdf_data = f.read()
-                        
-                        st.download_button(
-                            label="💾 Download PDF",
-                            data=pdf_data,
-                            file_name=os.path.basename(pdf_path),
-                            mime="application/pdf",
-                        )
-                        st.success(f"✅ PDF generated: {os.path.basename(pdf_path)}")
-                    else:
-                        st.error("❌ PDF generation failed")
-                
-                except ImportError as e:
-                    st.error(f"❌ reportlab and PyPDF2 required: `pip install reportlab PyPDF2`")
-                    st.exception(e)
-                except Exception as e:
-                    st.error(f"❌ Error generating PDF: {str(e)}")
-                    st.exception(e)  # Shows full traceback
+        # JSON
+        json_bytes = json.dumps(seq, ensure_ascii=False, indent=2).encode("utf-8")
+        st.download_button(
+            label="Export Line Sequence (JSON)",
+            data=json_bytes,
+            file_name=f"{name or 'thread_art'}_sequence.json",
+            mime="application/json",
+        )
 # === Gefundene Farben - Ausklappbarer Bereich (nur bei Custom Upload) ===
 if st.session_state.get("all_found_colors"):
     # Initialisiere expanded state falls nicht vorhanden
@@ -1243,22 +1147,23 @@ if st.session_state.get("all_found_colors"):
                 for idx, info in selected_items:
                     adjusted_percents[idx] = info['percent']
                 
-                # Für jede nicht-gewählte Farbe: Finde gewählte mit kleinstem Abstand
+                # Für jede nicht-gewählte Farbe: Finde nächste gewählte und addiere
                 for idx, info, sel in items_sorted:
                     if sel:
                         continue  # Überspringe gewählte
                     
-                    # Finde gewählte Farbe mit kleinstem Abstand (in derselben Kategorie)
+                    # Finde nächste gewählte Farbe (größer oder gleich)
                     target_idx = None
-                    min_distance = float('inf')
-                    
                     for sel_idx, sel_info in selected_items:
-                        distance = abs(sel_info['percent'] - info['percent'])
-                        if distance < min_distance:
-                            min_distance = distance
+                        if sel_info['percent'] >= info['percent']:
                             target_idx = sel_idx
+                            break
                     
-                    # Addiere nicht-gewählten Prozent auf nächste gewählte
+                    # Wenn keine größere gefunden, nimm die kleinste gewählte
+                    if target_idx is None and selected_items:
+                        target_idx = selected_items[-1][0]  # Letzte (kleinste) gewählte
+                    
+                    # Addiere nicht-gewählten Prozent auf Ziel
                     if target_idx is not None:
                         adjusted_percents[target_idx] += info['percent']
             
@@ -1272,8 +1177,10 @@ if st.session_state.get("all_found_colors"):
                 selected_hists.append(adjusted_percents[color_idx])
             
             if selected_colors:
-                # KEINE globale Normalisierung! Das würde Schwarz/Weiß verfälschen.
-                # Die Prozente bleiben wie sie sind (Summe < 100% ist OK, da wir Farben abgewählt haben)
+                # Normalisiere auf Summe = 1.0
+                total = sum(selected_hists)
+                if total > 0:
+                    selected_hists = [h / total for h in selected_hists]
                 
                 # === Berechne Group Order Vorschlag ===
                 # Berechne Luminanz für jede Farbe (0.299*R + 0.587*G + 0.114*B)
@@ -1319,8 +1226,6 @@ if st.session_state.get("all_found_colors"):
                 }
                 # Speichere Group Order Vorschlag in separatem Key (nicht das Widget selbst)
                 st.session_state["suggested_group_order"] = suggested_group_order
-                # Flag setzen: nach Vorschlag generieren kein automatisches Prefill
-                st.session_state["skip_prefill_after_suggestion"] = True
                 
                 # Klappe Farben-Palette ein
                 st.session_state.color_palette_expanded = False
@@ -1499,8 +1404,6 @@ def apply_suggestion_callback():
     
     # Update group_orders widget mit vorgeschlagener Sequenz
     st.session_state["group_orders_input"] = st.session_state.get("suggested_group_order", preset_group_orders or "4")
-    # Prefill-Flag zurücksetzen, da jetzt bewusst übernommen wurde
-    st.session_state["skip_prefill_after_suggestion"] = False
     
     # Lösche ALLE alten Widget-Keys - mit UND ohne Suffix!
     # Das ist wichtig, weil Streamlit Widgets mit ihren Keys cached
