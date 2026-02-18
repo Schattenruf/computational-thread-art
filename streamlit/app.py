@@ -950,46 +950,62 @@ We have 2 main tips here: firstly make sure to include enough loops so that no o
     # KRITISCH: Benutze den aktuellen Widget-Version Counter für Keys
     widget_version = st.session_state.get("widget_version", 0)
     widget_suffix = f"_v{widget_version}"
+    
+    # Initialisiere die session_state Keys VOR der Widget-Erstellung (um Warnings zu vermeiden)
+    for i in range(num_colors_to_render):
+        # Color picker
+        if f"color_pick_{i}{widget_suffix}" not in st.session_state:
+            hex_default = f"#{palette[i][0]:02x}{palette[i][1]:02x}{palette[i][2]:02x}"
+            st.session_state[f"color_pick_{i}{widget_suffix}"] = hex_default
+        
+        # Lines
+        if f"lines_{i}{widget_suffix}" not in st.session_state:
+            lines_default = max(100, int(n_lines[i]))
+            st.session_state[f"lines_{i}{widget_suffix}"] = lines_default
+        
+        # Darkness
+        if f"darkness_{i}{widget_suffix}" not in st.session_state:
+            st.session_state[f"darkness_{i}{widget_suffix}"] = darkness_values[i]
 
     for i in range(num_colors_to_render):
         # st.markdown(f"##### Color {i + 1}")
         col1, col2, col3 = st.columns([1, 2, 2])
 
         with col1:
-            # Lese von session_state mit dem aktuellen suffix
-            hex_default = f"#{palette[i][0]:02x}{palette[i][1]:02x}{palette[i][2]:02x}"
-            hex_from_state = st.session_state.get(f"color_pick_{i}{widget_suffix}", hex_default)
+            # Widget liest automatisch aus session_state wenn key verwendet wird
+																					   
+																								
             color_hex = st.color_picker(
                 "Color",
-                hex_from_state,
+							   
                 key=f"color_pick_{i}{widget_suffix}",
             )
             r, g, b = int(color_hex[1:3], 16), int(color_hex[3:5], 16), int(color_hex[5:7], 16)
 
         with col2:
-            # Lese von session_state mit dem aktuellen suffix
-            # Stelle sicher, dass der Wert nie unter dem Widget-Minimum liegt
-            lines_default = max(100, int(n_lines[i]))
-            lines_from_state = st.session_state.get(f"lines_{i}{widget_suffix}", lines_default)
-            lines_from_state = max(100, int(lines_from_state))
+            # Widget liest automatisch aus session_state wenn key verwendet wird
+																			 
+													 
+																							   
+															  
             lines = st.number_input(
                 "Lines",
                 min_value=100,
                 max_value=15000,
-                value=lines_from_state,
+									   
                 key=f"lines_{i}{widget_suffix}",
                 help="The total number of lines we'll draw for this color. 3 guidelines to consider here: (1) the line numbers should be roughly in proportion with their density in your image, (2) you should make sure to include a lot of black lines for most images because that's an important component of making a good piece of thread art, and (3) you should aim for about 6000 - 20000 total lues when summed over all colors (the exact number depends on some of your other parameters, and how detailed you want the piece to be).",
             )
 
         with col3:
-            # Lese von session_state mit dem aktuellen suffix
-            darkness_default = darkness_values[i]
-            darkness_from_state = st.session_state.get(f"darkness_{i}{widget_suffix}", darkness_default)
+            # Widget liest automatisch aus session_state wenn key verwendet wird
+												 
+																										
             darkness = st.number_input(
                 "Darkness",
                 min_value=0.05,
                 max_value=0.3,
-                value=darkness_from_state,
+										  
                 key=f"darkness_{i}{widget_suffix}",
                 step=0.01,
                 help="The float value we'll subtract from pixels after each line is drawn (pixels start at a maximum value of 1.0). Lines are constantly drawn through the regions whose pixels have the highest average value. Smaller values here will produce images with a higher contrast (because we draw more lines in the dark areas before moving to the light areas).",
@@ -1057,7 +1073,19 @@ if generate_button:
 
     # Display a status message
     try:
+        # Store group_orders in session_state for PDF export
+        st.session_state["group_orders"] = group_orders
+        
         with st.spinner("Preprocessing (takes about 10-20 seconds) ..."):
+            rect_defaults = {}
+            if shape == "Rectangle":
+                # Match upstream rectangle tuning for stable square outputs.
+                rect_defaults = {
+                    "critical_fracs": (0.14, 0.07),
+                    "critical_frac_penalty_power_decay": None,
+                    "width_to_gap_ratio": 4 / 6,
+                }
+
             # Set up parameters
             args = ThreadArtColorParams(
                 name=name,
@@ -1074,10 +1102,25 @@ if generate_button:
                 group_orders=group_orders,
                 image=image,
                 step_size=preset_step_size or 1.618,  # golden ratio for the lulz
+                **rect_defaults,
             )
 
             # Create image object
             my_img = Img(args)
+
+            # Store pin coordinates/meta for later visualization (avoid recomputing)
+            try:
+                st.session_state.pins_shape = str(my_img.args.shape)
+                st.session_state.pins_n_nodes = int(my_img.args.n_nodes)
+                st.session_state.pins_base_x = int(my_img.args.x)
+                st.session_state.pins_base_y = int(my_img.args.y)
+                # Convert torch tensors to plain floats for session_state
+                st.session_state.pins_d_coords = {
+                    int(k): [float(v[0].item()), float(v[1].item())] for k, v in my_img.args.d_coords.items()
+                }
+            except Exception:
+                # Fail silently; don't break generation UI
+                pass
 
         # Get the line dictionary (using progress bar) and capture full draw sequence
         line_dict = defaultdict(list)
@@ -1165,40 +1208,461 @@ if st.session_state.generated_html:
     html_height = html_width * st.session_state.sf
     st_html(st.session_state.generated_html, height=html_height + 150, scrolling=True)
 
+    # Pin visualization
+    st.subheader("📍 Pins (Nägel/Hooks)")
+    pins_use_hangers = st.checkbox(
+        "🔧 Haken verwenden (statt Nägel)",
+        value=True,
+        key="pins_use_hangers",
+        help="Aktiviert: 1 Haken = 2 Nodes (L/R). Deaktiviert: 1 Nagel = 1 Node",
+    )
+    pins_ctrl_a, pins_ctrl_b, pins_ctrl_c = st.columns(3)
+    with pins_ctrl_a:
+        pins_preview_width = st.slider(
+            "Pins preview width (px)",
+            min_value=400,
+            max_value=2000,
+            value=int(html_width),
+            step=50,
+            help="Groessere Breite macht die Haken/Pins besser sichtbar.",
+        )
+    with pins_ctrl_b:
+        pins_label_every = st.slider(
+            "Label every N",
+            min_value=1,
+            max_value=20,
+            value=5,
+            step=1,
+            help="Beschriftet Haken/Pins in diesem Abstand.",
+        )
+    with pins_ctrl_c:
+        pins_size_scale = st.slider(
+            "Pin size (%)",
+            min_value=50,
+            max_value=200,
+            value=120,
+            step=5,
+            help="Skaliert die Pin-Groesse fuer bessere Sichtbarkeit.",
+        )
+    pins_high_contrast = st.checkbox(
+        "High contrast preview",
+        value=True,
+        help="Weisser Hintergrund mit dunklen Pins und klaren Labels.",
+    )
+    pins_hook_rects = st.checkbox(
+        "Haken als Rechteck anzeigen",
+        value=True,
+        help="Zeigt pro Haken ein farblich geteiltes Rechteck (links/rechts).",
+    )
+    if st.button("Show pins", key="show_pins"):
+        try:
+            pins_d_coords = st.session_state.get("pins_d_coords")
+            pins_shape = st.session_state.get("pins_shape")
+            pins_n_nodes = int(st.session_state.get("pins_n_nodes") or 0)
+            pins_base_x = int(st.session_state.get("pins_base_x") or 0)
+            pins_base_y = int(st.session_state.get("pins_base_y") or 0)
+
+            if not pins_d_coords or pins_n_nodes <= 0 or pins_base_x <= 0 or pins_base_y <= 0:
+                st.warning("No pin data available yet. Generate the thread art first.")
+            else:
+                # Calculate drawing area first, then add padding around it
+                draw_w = int(pins_preview_width)
+                draw_h = int(draw_w * (pins_base_y / pins_base_x))
+                pad = max(40.0, draw_w * 0.08)  # 8% padding for better visibility
+                out_w = int(draw_w + 2 * pad)
+                out_h = int(draw_h + 2 * pad)
+                sx = draw_w / pins_base_x
+                sy = draw_h / pins_base_y
+
+                size_mult = max(0.5, min(2.0, pins_size_scale / 100.0))
+                pin_r = max(3.0, out_w * 0.006) * size_mult
+                stroke_w = max(1.0, out_w * 0.0018) * size_mult
+                font_size = max(10, int(out_w * 0.02))
+                text_dy = font_size * 0.35
+
+                if pins_high_contrast:
+                    bg_col = "rgb(245,245,245)"
+                    pin_fill = "rgb(20,20,20)"
+                    pin_stroke = "rgb(255,255,255)"
+                    outline_col = "rgb(60,60,60)"
+                    label_fill = "rgb(20,20,20)"
+                    label_stroke = "rgb(255,255,255)"
+                    hook_left = "rgb(30,30,30)"
+                    hook_right = "rgb(150,150,150)"
+                else:
+                    bg_col = "rgb(0,0,0)"
+                    pin_fill = "rgb(255,0,0)"
+                    pin_stroke = "rgb(200,0,0)"
+                    outline_col = "rgb(90,90,90)"
+                    label_fill = "rgb(255,255,255)"
+                    label_stroke = "rgb(0,0,0)"
+                    hook_left = "rgb(255,70,70)"
+                    hook_right = "rgb(255,160,160)"
+
+                svg_lines = [
+                    f'<svg xmlns="http://www.w3.org/2000/svg" width="{out_w}" height="{out_h}" viewBox="0 0 {out_w} {out_h}">',
+                    f'<rect width="{out_w}" height="{out_h}" fill="{bg_col}"/>'
+                ]
+                svg_lines.append(
+                    "<style>text{paint-order:stroke;stroke-width:2px;font-weight:700;}</style>"
+                )
+
+                # Outline to match chosen shape; for square images ellipse becomes a circle naturally.
+                if str(pins_shape) == "Ellipse":
+                    cx = pad + draw_w / 2
+                    cy = pad + draw_h / 2
+                    rx = draw_w / 2
+                    ry = draw_h / 2
+                    svg_lines.append(
+                        f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{rx:.1f}" ry="{ry:.1f}" '
+                        f'stroke="{outline_col}" stroke-width="{stroke_w:.2f}" fill="none"/>'
+                    )
+                else:
+                    svg_lines.append(
+                        f'<rect x="{pad:.1f}" y="{pad:.1f}" width="{draw_w:.1f}" height="{draw_h:.1f}" '
+                        f'stroke="{outline_col}" stroke-width="{stroke_w:.2f}" fill="none"/>'
+                    )
+
+                # Calculate center for rotation
+                cx0 = pad + draw_w / 2
+                cy0 = pad + draw_h / 2
+
+                if pins_use_hangers:
+                    # Hooks: 1 hook = 2 nodes (L/R)
+                    if (pins_n_nodes % 2) != 0:
+                        st.warning("Ungültige Node-Anzahl für Haken-Modus (muss gerade sein). Zeige Nagel-Nummern.")
+                        pins_use_hangers = False
+                    else:
+                        n_hooks = pins_n_nodes // 2
+                        
+                        for hook_idx in range(n_hooks):
+                            a = 2 * hook_idx
+                            b = a + 1
+                            ca = pins_d_coords.get(a)
+                            cb = pins_d_coords.get(b)
+                            if ca is None or cb is None:
+                                continue
+
+                            ya, xa = float(ca[0]) * sy + pad, float(ca[1]) * sx + pad
+                            yb, xb = float(cb[0]) * sy + pad, float(cb[1]) * sx + pad
+                            mx = (xa + xb) / 2
+                            my = (ya + yb) / 2
+
+                            # Calculate angles and distance for rotation
+                            vx = mx - cx0
+                            vy = my - cy0
+                            angle_rad = np.arctan2(vy, vx)
+                            angle_deg = np.degrees(angle_rad)
+
+                            # Frame around the two nodes that belong to this hook
+                            dx = xb - xa
+                            dy = yb - ya
+                            dist = (dx * dx + dy * dy) ** 0.5
+                            frame_pad = pin_r * 1.2
+                            frame_w = dist + frame_pad * 2
+                            frame_h = pin_r * 3.2
+                            svg_lines.append(
+                                f'<g transform="translate({mx:.1f},{my:.1f}) rotate({angle_deg:.1f})">'
+                            )
+                            svg_lines.append(
+                                f'<rect x="{-(frame_w/2):.1f}" y="{-(frame_h/2):.1f}" width="{frame_w:.1f}" height="{frame_h:.1f}" '
+                                f'fill="none" stroke="{outline_col}" stroke-width="{stroke_w:.2f}" rx="{max(2.0, pin_r * 0.6):.1f}" ry="{max(2.0, pin_r * 0.6):.1f}"/>'
+                            )
+                            svg_lines.append('</g>')
+
+                            # Draw rotated hook rectangle (slightly smaller for more spacing)
+                            if pins_hook_rects:
+                                rect_w = pin_r * 4.6
+                                rect_h = pin_r * 1.6
+                                rx = max(2.0, pin_r * 0.7)
+                                
+                                # Create transform group for rotation
+                                svg_lines.append(
+                                    f'<g transform="translate({mx:.1f},{my:.1f}) rotate({angle_deg:.1f})">'
+                                )
+                                # Top half (dark)
+                                svg_lines.append(
+                                    f'<rect x="{-(rect_w/2):.1f}" y="{-(rect_h/2):.1f}" width="{rect_w:.1f}" height="{(rect_h/2):.1f}" '
+                                    f'fill="{hook_left}" stroke="{outline_col}" stroke-width="{stroke_w:.2f}" rx="{rx:.1f}" ry="{rx:.1f}"/>'
+                                )
+                                # Bottom half (light)
+                                svg_lines.append(
+                                    f'<rect x="{-(rect_w/2):.1f}" y="0" width="{rect_w:.1f}" height="{(rect_h/2):.1f}" '
+                                    f'fill="{hook_right}" stroke="{outline_col}" stroke-width="{stroke_w:.2f}" rx="{rx:.1f}" ry="{rx:.1f}"/>'
+                                )
+                                svg_lines.append('</g>')
+
+                            # Draw label for hooks (hook 1 and every nth hook)
+                            hook_no = hook_idx + 1
+                            if hook_no == 1 or (hook_no % pins_label_every) == 0:
+                                # Offset label slightly outward
+                                norm = (vx * vx + vy * vy) ** 0.5
+                                if norm > 1e-6:
+                                    off = pin_r * 2.2
+                                    lx = mx + off * (vx / norm)
+                                    ly = my + off * (vy / norm)
+                                else:
+                                    lx, ly = mx, my
+
+                                svg_lines.append(
+                                    f'<text x="{lx:.1f}" y="{(ly + text_dy):.1f}" text-anchor="middle" '
+                                    f'fill="{label_fill}" stroke="{label_stroke}" font-size="{font_size}">{hook_no}</text>'
+                                )
+
+                if not pins_use_hangers:
+                    # Nails: each node is a nail, draw as rotated rectangle
+                    for idx in range(pins_n_nodes):
+                        coord = pins_d_coords.get(idx)
+                        if coord is None:
+                            continue
+                        y0, x0 = float(coord[0]), float(coord[1])
+                        x_px = x0 * sx + pad
+                        y_px = y0 * sy + pad
+                        pin_no = idx + 1
+
+                        # Calculate angle for rotation
+                        vx = x_px - cx0
+                        vy = y_px - cy0
+                        angle_rad = np.arctan2(vy, vx)
+                        angle_deg = np.degrees(angle_rad)
+
+                        # Draw rotated nail rectangle
+                        rect_w = pin_r * 5.2
+                        rect_h = pin_r * 2.6
+                        rx = max(2.0, pin_r * 0.7)
+                        
+                        svg_lines.append(
+                            f'<g transform="translate({x_px:.1f},{y_px:.1f}) rotate({angle_deg:.1f})">'
+                        )
+                        svg_lines.append(
+                            f'<rect x="{-(rect_w/2):.1f}" y="{-(rect_h/2):.1f}" width="{rect_w:.1f}" height="{rect_h:.1f}" '
+                            f'fill="{pin_fill}" stroke="{pin_stroke}" stroke-width="{stroke_w:.2f}" rx="{rx:.1f}" ry="{rx:.1f}"/>'
+                        )
+                        svg_lines.append('</g>')
+
+                        # Draw label for nails (nail 1 and every nth nail)
+                        if pin_no == 1 or (pin_no % pins_label_every) == 0:
+                            # Offset label slightly outward
+                            norm = (vx * vx + vy * vy) ** 0.5
+                            if norm > 1e-6:
+                                off = pin_r * 2.2
+                                lx = x_px + off * (vx / norm)
+                                ly = y_px + off * (vy / norm)
+                            else:
+                                lx, ly = x_px, y_px
+                            
+                            svg_lines.append(
+                                f'<text x="{lx:.1f}" y="{(ly + text_dy):.1f}" text-anchor="middle" '
+                                f'fill="{label_fill}" stroke="{label_stroke}" font-size="{font_size}">{pin_no}</text>'
+                            )
+
+                svg_lines.append("</svg>")
+                pins_svg = "\n".join(svg_lines)
+
+                st_html(pins_svg, height=out_h + 20, scrolling=True)
+                st.download_button(
+                    label="Download pins SVG",
+                    data=pins_svg.encode("utf-8"),
+                    file_name=f"{name or 'thread_art'}_{'hooks' if pins_use_hangers else 'nails'}_pins.svg",
+                    mime="image/svg+xml",
+                )
+        except Exception as e:
+            st.error(f"Error generating pins SVG: {str(e)}")
+            st.code(traceback.format_exc())
+
     # Download options
-    st.subheader("Download Options")
+    st.subheader("📥 Download Options")
 
     # Provide HTML download
     b64_html = base64.b64encode(st.session_state.generated_html.encode()).decode()
     href_html = f'<a href="data:text/html;base64,{b64_html}" download="{name}.html">Download HTML File</a>'
     st.markdown(href_html, unsafe_allow_html=True)
 
-    # Export line sequence (CSV / JSON)
+    # Export line sequence (CSV / JSON / PDF)
     if st.session_state.get("line_sequence"):
         seq = st.session_state.line_sequence
-        # CSV
-        import io as _io
-        csv_buf = _io.StringIO()
-        csv_buf.write("step,color_index,color_hex,r,g,b,from_pin,to_pin\n")
-        for row in seq:
-            r, g, b = row["rgb"]
-            csv_buf.write(f"{row['step']},{row['color_index']},{row['color_hex']},{r},{g},{b},{row['from_pin']},{row['to_pin']}\n")
-        csv_bytes = csv_buf.getvalue().encode("utf-8")
-        st.download_button(
-            label="Export Line Sequence (CSV)",
-            data=csv_bytes,
-            file_name=f"{name or 'thread_art'}_sequence.csv",
-            mime="text/csv",
-        )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        # CSV Export
+        with col1:
+            import io as _io
+            csv_buf = _io.StringIO()
+            csv_buf.write("step,color_index,color_hex,r,g,b,from_pin,to_pin\n")
+            for row in seq:
+                r, g, b = row["rgb"]
+                csv_buf.write(f"{row['step']},{row['color_index']},{row['color_hex']},{r},{g},{b},{row['from_pin']},{row['to_pin']}\n")
+            csv_bytes = csv_buf.getvalue().encode("utf-8")
+            st.download_button(
+                label="📊 CSV",
+                data=csv_bytes,
+                file_name=f"{name or 'thread_art'}_sequence.csv",
+                mime="text/csv",
+            )
 
-        # JSON
-        json_bytes = json.dumps(seq, ensure_ascii=False, indent=2).encode("utf-8")
-        st.download_button(
-            label="Export Line Sequence (JSON)",
-            data=json_bytes,
-            file_name=f"{name or 'thread_art'}_sequence.json",
-            mime="application/json",
-        )
+        # JSON Export
+        with col2:
+            json_bytes = json.dumps(seq, ensure_ascii=False, indent=2).encode("utf-8")
+            st.download_button(
+                label="📄 JSON",
+                data=json_bytes,
+                file_name=f"{name or 'thread_art'}_sequence.json",
+                mime="application/json",
+            )
+        
+        # PDF Export (Picture Hangers)
+        with col3:
+            # Checkbox für Haken vs Nägel
+            use_hangers = st.checkbox(
+                "🔧 Haken verwenden (statt Nägel)", 
+                value=True,
+                help="Aktiviert: 1 Haken = 2 Nodes (L/R). Deaktiviert: 1 Nagel = 1 Node"
+            )
+            
+            if st.button("🖨️ Generate PDF Instructions", key="gen_pdf"):
+                try:
+                    from pdf_export import export_to_pdf
+                    
+                    # Get color information
+                    detected_colors = st.session_state.get("all_found_colors", [])
+                    group_orders = st.session_state.get("group_orders", "")
+                    n_nodes = st.session_state.get("n_nodes_real", 320)
+                    
+                    # Extract unique colors from line_sequence in order of appearance
+                    # This ensures color_names matches the order intended in group_orders
+                    hex_to_category_info = {}
+                    for category, color_info in detected_colors:
+                        hex_val = color_info.get('hex', '').lower()
+                        if hex_val:
+                            hex_to_category_info[hex_val] = (category, color_info)
+                    
+                    # Build color_names and color_info_list based on appearance order in seq
+                    seen_hexes = []
+                    for row in seq:
+                        hex_val = str(row.get("color_hex", "")).lower()
+                        if hex_val and hex_val not in seen_hexes:
+                            seen_hexes.append(hex_val)
+                    
+                    # Helper function to categorize unknown hex colors based on HSV
+                    def categorize_hex_by_hsv(hex_str):
+                        """Categorize a hex color by its HSV hue using the existing rgb_to_hsv function"""
+                        try:
+                            # Parse hex to RGB
+                            hex_clean = hex_str.lstrip('#').lower()
+                            if len(hex_clean) != 6:
+                                return "Color"
+                            r = int(hex_clean[0:2], 16)
+                            g = int(hex_clean[2:4], 16)
+                            b = int(hex_clean[4:6], 16)
+                            
+                            # Use existing rgb_to_hsv function
+                            rgb_arr = np.array([[[r, g, b]]], dtype=np.uint8)
+                            hsv_arr = rgb_to_hsv(rgb_arr)
+                            h = hsv_arr[0, 0, 0] * 360  # Convert to 0-360 range
+                            s = hsv_arr[0, 0, 1]
+                            v = hsv_arr[0, 0, 2]
+                            
+                            # Categorize by hue (allowing wider red range for brown/dark reds)
+                            # Red: -30 to 30 degrees (includes browns around 10-20)
+                            if h < 30 or h >= 330:
+                                return "Rot"
+                            # Green: 60-170 degrees
+                            elif 60 <= h < 170:
+                                return "Grün"
+                            # Blue: 200-280 degrees
+                            elif 200 <= h < 280:
+                                return "Blau"
+                            else:
+                                return "Color"
+                        except Exception as e:
+                            print(f"Error categorizing {hex_str}: {e}")
+                            return "Color"
+                    
+                    # Create color_names and color_info_list in the order they appear in seq
+                    color_names = []
+                    color_info_list = []
+                    for i, hex_val in enumerate(seen_hexes):
+                        if hex_val in hex_to_category_info:
+                            category, color_info = hex_to_category_info[hex_val]
+                            color_names.append(category)
+                            color_info_list.append(color_info)
+                        else:
+                            # Fallback: Categorize by HSV hue
+                            category = categorize_hex_by_hsv(hex_val)
+                            color_names.append(category)
+                            color_info_list.append({"hex": hex_val, "name": category})
+                    
+                    # IMPORTANT: Re-index seq with new color_index values!
+                    # Build mapping from old hex → new 1-based index
+                    hex_to_new_index = {}
+                    for i, hex_val in enumerate(seen_hexes):
+                        hex_to_new_index[hex_val] = i + 1  # 1-based index for PDF
+                    
+                    # Update seq with new color_index values
+                    for row in seq:
+                        old_hex = str(row.get("color_hex", "")).lower()
+                        if old_hex in hex_to_new_index:
+                            row["color_index"] = hex_to_new_index[old_hex]
+                    
+                    # Debug info display
+                    with st.expander("🔍 Debug Info", expanded=False):
+                        st.write(f"**line_sequence**: {len(seq)} entries")
+                        if seq and len(seq) > 0:
+                            st.write(f"**First entry type**: {type(seq[0])}")
+                            st.write(f"**First entry**: {seq[0]}")
+                            # Quick glance at the first 20 colors in the sequence
+                            first_colors = [row.get("color_hex", "") for row in seq[:20]]
+                            st.write(f"**First 20 color_hex**: {first_colors}")
+                            # Order of colors by first appearance (hex-based)
+                            color_order = []
+                            for row in seq:
+                                hx = str(row.get("color_hex", "")).lower()
+                                if hx and hx not in color_order:
+                                    color_order.append(hx)
+                                if len(color_order) > 20:
+                                    break
+                            st.write(f"**Color order (first appearance)**: {color_order}")
+                        st.write(f"**hex_to_new_index mapping**: {hex_to_new_index}")
+                        st.write(f"**color_names**: {color_names}")
+                        st.write(f"**group_orders**: `{repr(group_orders)}`")
+                        st.write(f"**n_nodes**: {n_nodes}")
+                    
+                    # Generate PDF
+                    output_path = f"outputs_drawing/{name or 'thread_art'}_instructions"
+                    pdf_path = export_to_pdf(
+                        line_sequence=seq,
+                        color_names=color_names,
+                        color_info_list=color_info_list,
+                        group_orders=group_orders,
+                        output_path=output_path,
+                        n_nodes=n_nodes,
+                        num_cols=3,
+                        num_rows=18,
+                        include_stats=True,
+                        version="n+1",
+                        use_hangers=use_hangers
+                    )
+                    
+                    if pdf_path and os.path.exists(pdf_path):
+                        with open(pdf_path, "rb") as f:
+                            pdf_data = f.read()
+                        
+                        st.download_button(
+                            label="💾 Download PDF",
+                            data=pdf_data,
+                            file_name=os.path.basename(pdf_path),
+                            mime="application/pdf",
+                        )
+                        st.success(f"✅ PDF generated: {os.path.basename(pdf_path)}")
+                    else:
+                        st.error("❌ PDF generation failed")
+                
+                except ImportError as e:
+                    st.error(f"❌ reportlab and PyPDF2 required: `pip install reportlab PyPDF2`")
+                    st.exception(e)
+                except Exception as e:
+                    st.error(f"❌ Error generating PDF: {str(e)}")
+                    st.exception(e)  # Shows full traceback
 # === Gefundene Farben - Ausklappbarer Bereich (nur bei Custom Upload) ===
 if st.session_state.get("all_found_colors"):
     # Initialisiere expanded state falls nicht vorhanden
@@ -1270,23 +1734,27 @@ if st.session_state.get("all_found_colors"):
                 for idx, info in selected_items:
                     adjusted_percents[idx] = info['percent']
                 
-                # Für jede nicht-gewählte Farbe: Finde nächste gewählte und addiere
+                # Für jede nicht-gewählte Farbe: Finde gewählte mit kleinstem Abstand
                 for idx, info, sel in items_sorted:
                     if sel:
                         continue  # Überspringe gewählte
                     
-                    # Finde nächste gewählte Farbe (größer oder gleich)
+                    # Finde gewählte Farbe mit kleinstem Abstand (in derselben Kategorie)
                     target_idx = None
+                    min_distance = float('inf')
+                    
                     for sel_idx, sel_info in selected_items:
-                        if sel_info['percent'] >= info['percent']:
+                        distance = abs(sel_info['percent'] - info['percent'])
+                        if distance < min_distance:
+                            min_distance = distance
                             target_idx = sel_idx
-                            break
+								 
+					
+																				
+															 
+																						 
                     
-                    # Wenn keine größere gefunden, nimm die kleinste gewählte
-                    if target_idx is None and selected_items:
-                        target_idx = selected_items[-1][0]  # Letzte (kleinste) gewählte
-                    
-                    # Addiere nicht-gewählten Prozent auf Ziel
+                    # Addiere nicht-gewählten Prozent auf nächste gewählte
                     if target_idx is not None:
                         adjusted_percents[target_idx] += info['percent']
             
@@ -1300,10 +1768,10 @@ if st.session_state.get("all_found_colors"):
                 selected_hists.append(adjusted_percents[color_idx])
             
             if selected_colors:
-                # Normalisiere auf Summe = 1.0
-                total = sum(selected_hists)
-                if total > 0:
-                    selected_hists = [h / total for h in selected_hists]
+                # KEINE globale Normalisierung! Das würde Schwarz/Weiß verfälschen.
+                # Die Prozente bleiben wie sie sind (Summe < 100% ist OK, da wir Farben abgewählt haben)
+							 
+																		
                 
                 # === Berechne Group Order Vorschlag ===
                 # Berechne Luminanz für jede Farbe (0.299*R + 0.587*G + 0.114*B)
@@ -1349,6 +1817,8 @@ if st.session_state.get("all_found_colors"):
                 }
                 # Speichere Group Order Vorschlag in separatem Key (nicht das Widget selbst)
                 st.session_state["suggested_group_order"] = suggested_group_order
+                # Flag setzen: nach Vorschlag generieren kein automatisches Prefill
+                st.session_state["skip_prefill_after_suggestion"] = True
                 
                 # Klappe Farben-Palette ein
                 st.session_state.color_palette_expanded = False
@@ -1364,141 +1834,168 @@ def apply_suggestion_callback():
     
     data = st.session_state.decompose_data
     palette = data["palette"]
-    histogram = data["color_histogram"]
-    n_lines_total = st.session_state.get("decompose_total_lines_input", 10000)
+									   
+																			  
     
-    # Validate and normalize histogram to list of numbers
-    try:
-        if histogram and isinstance(histogram[0], dict):
-            histogram = [item.get('percent', 0) for item in histogram]
-        elif histogram and isinstance(histogram[0], (list, tuple)):
-            histogram = [float(item[0]) if item else 0 for item in histogram]
-        histogram = [float(h) if not isinstance(h, (list, tuple, dict)) else 0 for h in histogram]
-    except Exception:
-        histogram = [1.0 / len(palette)] * len(palette)
+    # Verwende die vorberechneten Linienzahlen aus decompose_image
+    if "n_lines_per_color" in data:
+        suggested_lines = data["n_lines_per_color"]
+    else:
+        # Fallback: Verwende einfache Prozentverteilung
+        histogram = data.get("color_histogram", [])
+        n_lines_total = st.session_state.get("decompose_total_lines_input", 10000)
+        
+        # Normalize histogram
+        try:
+            if histogram and isinstance(histogram[0], dict):
+                histogram = [item.get('percent', 0) for item in histogram]
+            elif histogram and isinstance(histogram[0], (list, tuple)):
+                histogram = [float(item[0]) if item else 0 for item in histogram]
+            histogram = [float(h) if not isinstance(h, (list, tuple, dict)) else 0 for h in histogram]
+        except Exception:
+            histogram = [1.0 / len(palette)] * len(palette)
+        
+												   
+																							   
+																		
+
+				   
+													
+        suggested_lines = [int(h * n_lines_total) for h in histogram]
+        # Adjust remainder to darkest color
+												   
+																						
+
+						 
+								  
+
+															   
+					 
+										 
+										  
+															 
+										  
+
+									   
+        remainder = n_lines_total - sum(suggested_lines)
+        if remainder != 0:
+            try:
+                luminances = [0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] for c in palette]
+                darkest_idx = min(range(len(luminances)), key=lambda i: luminances[i])
+            except Exception:
+                darkest_idx = 0
+																  
+																								   
+
+					  
+																						
+																
+								 
+																			  
+																			 
+							
+										 
+																					
+											 
+								   
+																	 
+				 
+							
+										 
+																		   
+											 
+								   
+																	 
+			 
+											   
+											 
+
+																				
+																									   
+																						   
+				  
+																	  
+							
+											  
+														
+																												
+							
+																
+										  
+							
+							 
+						 
+						
+																  
+            suggested_lines[darkest_idx] += remainder
     
-    # Berechne Linienzahlen basierend auf Histogram
-    # Ziel: Top-Farbe (höchste Prozent) nicht weiter erhöhen; kleine Farben auf MIN fixieren;
-    # notwendige Anpassungen nur über die niedrigeren Farben verteilen.
-
-    MIN_LINES = 100
-    # Rohwerte nach Verteilung (Kategorie-bereinigt)
-    raw_lines = [int(round(h * n_lines_total)) for h in histogram]
-
-    # Top-Farbe (höchster Prozentanteil) bestimmen
-    top_idx = max(range(len(histogram)), key=lambda i: histogram[i]) if histogram else 0
-
-    # Start mit Rohwerten
-    suggested_lines = raw_lines[:]
-
-    # Kleine Farben auf MIN_LINES anheben, Defizit aufsummieren
-    deficit_total = 0
-    for i in range(len(suggested_lines)):
-        if suggested_lines[i] < MIN_LINES:
-            deficit_total += (MIN_LINES - suggested_lines[i])
-            suggested_lines[i] = MIN_LINES
-
-    # Summe prüfen und Delta berechnen
-    current_sum = sum(suggested_lines)
-    delta = n_lines_total - current_sum
-
-    if delta != 0:
-        # Anpassbare Indizes: alle außer Top-Farbe und nur solche > MIN_LINES
-        adjustable = [i for i in range(len(suggested_lines)) if i != top_idx and suggested_lines[i] > MIN_LINES]
-        if not adjustable:
-            # Fallback: wenn nichts anpassbar, nimm Top-Farbe dazu
-            adjustable = [i for i in range(len(suggested_lines)) if suggested_lines[i] > MIN_LINES]
-
-        if adjustable:
-            # Verteile delta proportional an Histogrammanteile dieser anpassbaren Farben
-            hist_sum_adj = sum(histogram[i] for i in adjustable)
-            if hist_sum_adj == 0:
-                # Fallback: proportionale Verteilung nach aktueller Linienzahl
-                total_adj_lines = sum(suggested_lines[i] for i in adjustable)
-                assigned = 0
-                for i in adjustable[:-1]:
-                    add = int(round(delta * (suggested_lines[i] / total_adj_lines)))
-                    suggested_lines[i] += add
-                    assigned += add
-                suggested_lines[adjustable[-1]] += (delta - assigned)
-            else:
-                assigned = 0
-                for i in adjustable[:-1]:
-                    add = int(round(delta * (histogram[i] / hist_sum_adj)))
-                    suggested_lines[i] += add
-                    assigned += add
-                suggested_lines[adjustable[-1]] += (delta - assigned)
-        else:
-            # End-Fallback: alles auf Top-Farbe
-            suggested_lines[top_idx] += delta
-
-        # Sicherstellen, dass durch Anpassung keine Farbe unter MIN_LINES fällt
-        # Falls doch, korrigiere und verschiebe Rest wieder in verbleibende Gruppe (einfacher Fallback)
-        unders = [i for i in range(len(suggested_lines)) if suggested_lines[i] < MIN_LINES]
-        if unders:
-            need = sum(MIN_LINES - suggested_lines[i] for i in unders)
-            for i in unders:
-                suggested_lines[i] = MIN_LINES
-            # Ziehe Bedarf von nicht-Top, >MIN Linien ab
-            donors = [i for i in range(len(suggested_lines)) if i != top_idx and suggested_lines[i] > MIN_LINES]
-            for i in donors:
-                take = min(need, suggested_lines[i] - MIN_LINES)
-                suggested_lines[i] -= take
-                need -= take
-                if need <= 0:
-                    break
-            if need > 0:
-                # Wenn immer noch Bedarf: letzter Ausweg Top-Farbe
-                suggested_lines[top_idx] = max(MIN_LINES, suggested_lines[top_idx] - need)
+    # === Berechne intelligente Group Order basierend auf Farbhistogramm ===
+    num_colors = len(palette)
+													  
+														
     
-    # === Berechne intelligente Group Order ===
-    # Strategie: Erstelle Sequenz von hell nach dunkel für bessere Tiefe
-    # Mehrere Durchläufe, damit keine Farbe dominiert
-    # Dunklere Farben (besonders schwarz) öfter am Ende
-    
-    # Berechne Luminanz für jede Farbe (0.299*R + 0.587*G + 0.114*B)
+    # Verwende Luminanz (Helligkeit) um eine intelligente Reihenfolge zu bauen
     luminances = []
     for color in palette:
         lum = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
         luminances.append(lum)
     
-    # Sortiere Farben nach Luminanz (hell -> dunkel)
-    # Das gibt uns die optimale Reihenfolge (helle unten, dunkle oben)
-    sorted_indices = sorted(range(len(palette)), key=lambda i: luminances[i], reverse=True)
+    # Sortiere Farben nach Helligkeit
+																	  
+    color_indices_by_brightness = sorted(range(num_colors), key=lambda i: luminances[i], reverse=True)  # Hell zu Dunkel
     
-    # Erstelle Group Order: 1-basiert!
-    num_colors = len(palette)
+    # Teile in Hell und Dunkel
+    luminance_threshold = sum(luminances) / len(luminances)  # Durchschnitt als Schwelle
+    bright_colors = [i for i in color_indices_by_brightness if luminances[i] >= luminance_threshold]
+    dark_colors = [i for i in color_indices_by_brightness if luminances[i] < luminance_threshold]
     
-    # Basis-Sequenz: Alle Farben von hell nach dunkel
-    base_sequence = [idx + 1 for idx in sorted_indices]  # +1 weil 1-basiert
+    # Baue Sequenz: Alterniere Hell-Dunkel um Übersteurung zu vermeiden
+    suggested_sequence = []
     
-    # Anzahl der Basis-Loops basierend auf Farbanzahl
-    if num_colors <= 2:
-        num_loops = 4  # Wenige Farben -> mehr Loops
-    elif num_colors <= 4:
-        num_loops = 4
-    elif num_colors <= 6:
-        num_loops = 3
+    if num_colors == 1:
+        suggested_sequence = [1]
+    elif num_colors == 2:
+        # Hell, Dunkel, Hell, Dunkel (alternierend)
+        bright_idx = color_indices_by_brightness[0] + 1
+        dark_idx = color_indices_by_brightness[1] + 1
+        suggested_sequence = [bright_idx, dark_idx, bright_idx, dark_idx]
+    elif num_colors == 3:
+        # Bright, Dark, Bright, Dark, Mid, Dark (alternierend hell-dunkel)
+        bright_idx = color_indices_by_brightness[0] + 1
+        mid_idx = color_indices_by_brightness[1] + 1
+        dark_idx = color_indices_by_brightness[2] + 1
+        suggested_sequence = [bright_idx, dark_idx, mid_idx, dark_idx, bright_idx, dark_idx]
+    elif num_colors == 4:
+        # Strategie: Hellste, dann mittlere (dunkel zu hell), dann hellste wieder, dann dunkelste, dann mittlere wieder, dann dunkelste
+        # Beispiel: [1=Schwarz, 2=#311007, 3=#853921, 4=#AFB52A(hell)]
+        # Sortiert nach Helligkeit: [4, 3, 2, 1]
+        # Sequenz: 4, 2, 3, 4, 1, 2, 3, 1
+        indices = [color_indices_by_brightness[i] + 1 for i in range(4)]
+        brightest = indices[0]
+        darkest = indices[3]
+        mid1 = indices[2]  # dunklere mittlere
+        mid2 = indices[1]  # hellere mittlere
+        suggested_sequence = [brightest, mid1, mid2, brightest, darkest, mid1, mid2, darkest]
     else:
-        num_loops = 2  # Viele Farben -> weniger Loops
+        # Mehr als 4 Farben: Alterniere zwischen hell und dunkel
+        suggested_sequence = []
+        bi, di = 0, 0
+        while len(suggested_sequence) < min(20, num_colors * 3) and (bi < len(bright_colors) or di < len(dark_colors)):
+            if bi < len(bright_colors):
+                suggested_sequence.append(bright_colors[bi] + 1)
+                bi += 1
+            if di < len(dark_colors) and len(suggested_sequence) < min(20, num_colors * 3):
+                suggested_sequence.append(dark_colors[di] + 1)
+                di += 1
+																							
+	
+													   
+							   
+															 
+										
     
-    # Erstelle Sequenz mit mehreren Durchläufen
-    group_order_list = []
-    for loop in range(num_loops):
-        group_order_list.extend(base_sequence)
-    
-    # Extra: Dunkelste Farbe(n) nochmal am Ende hinzufügen für Tiefe
-    # Finde die dunkelsten 1-2 Farben (max 2, aber mindestens 1)
-    num_darkest = min(2, num_colors)
-    darkest_indices = sorted(range(len(palette)), key=lambda i: luminances[i])[:num_darkest]
-    
-    # Füge dunkelste Farben extra am Ende hinzu (2-3x)
-    for idx in darkest_indices:
-        group_order_list.append(idx + 1)  # +1 weil 1-basiert
-        group_order_list.append(idx + 1)
-    
-    # Konvertiere zu String
-    suggested_group_order = ",".join(map(str, group_order_list))
+						   
+    suggested_group_order = ",".join(map(str, suggested_sequence))
     
     # Speichere in session_state
     st.session_state["suggested_group_order"] = suggested_group_order
@@ -1527,16 +2024,19 @@ def apply_suggestion_callback():
     
     # Update group_orders widget mit vorgeschlagener Sequenz
     st.session_state["group_orders_input"] = st.session_state.get("suggested_group_order", preset_group_orders or "4")
+    # Prefill-Flag zurücksetzen, da jetzt bewusst übernommen wurde
+    st.session_state["skip_prefill_after_suggestion"] = False
     
-    # Lösche ALLE alten Widget-Keys - mit UND ohne Suffix!
-    # Das ist wichtig, weil Streamlit Widgets mit ihren Keys cached
-    for version in range(10):  # Check versions 0-9
+    # Lösche ALTE Widget-Keys (aber nicht die neuen mit new_version!)
+																   
+    for version in range(new_version):  # Nur alte Versionen, nicht die neue!
         for i in range(20):
             for key_prefix in ["color_pick_", "lines_", "darkness_"]:
-                # Lösche Keys ohne Suffix
-                key = f"{key_prefix}{i}"
-                if key in st.session_state:
-                    del st.session_state[key]
+                # Lösche Keys ohne Suffix (nur wenn version == 0)
+                if version == 0:
+                    key = f"{key_prefix}{i}"
+                    if key in st.session_state:
+                        del st.session_state[key]
                 # Lösche Keys mit alten Versionen
                 old_key = f"{key_prefix}{i}_v{version}"
                 if old_key in st.session_state:
@@ -1562,7 +2062,10 @@ if st.button("Vorschlag anzeigen", key="show_decompose_global"):
         data = st.session_state.decompose_data
         obj = SimpleNamespace(palette=data["palette"], color_histogram=data["color_histogram"])
         try:
-            decompose_image(obj, n_lines_total=n_lines_total_input)
+            n_lines_per_color = decompose_image(obj, n_lines_total=n_lines_total_input)
+            # Speichere die berechneten Linienzahlen
+            if n_lines_per_color:
+                st.session_state.decompose_data["n_lines_per_color"] = n_lines_per_color
         except Exception as e:
             st.error(f"Fehler beim Anzeigen der Verteilung: {e}")
     else:
@@ -1590,6 +2093,7 @@ if st.session_state.get("suggestion_displayed", False):
         key="apply_suggestion_to_ui",
         on_click=apply_suggestion_callback
     )
+    
     # # Show embed code for Squarespace
     # st.subheader("Embed Code for Squarespace")
     # st.text_area("Copy this code into a Code Block in Squarespace:", st.session_state.generated_html, height=200)
